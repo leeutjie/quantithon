@@ -10,6 +10,7 @@ knitr::opts_chunk$set(echo = TRUE)
 
 library(pacman)
 pacman::p_load(tidyverse, devtools, FactoMineR, factoextra, broom, rmsfuns, readr, stochvol, tsBSS, psych, rugarch, rmgarch, forecast, tbl2xts, lubridate, PerformanceAnalytics, ggthemes, MTS, robustbase, cowplot, knitr)
+# pacman::p_load_gh("Nicktz/fmxdat")
 
 
 # load code scripts for functions
@@ -17,8 +18,8 @@ list.files('code/', full.names = T, recursive = T) %>% as.list() %>% walk(~sourc
 
 
 data <- read_csv("data/quantathon_hannah.csv")
-pcaseries <- lapply(data[,-1],as.double)
 pcaseries <- data
+PCA_AllData <- data
 
 ```
 
@@ -38,7 +39,9 @@ pacman::p_load(cluster, fmxdat)
 corr <- cov2cor(sigma)
 distmat <- ((1 - corr)/2)^0.5
 distmat <- ((1 - corr)/2)^0.5
+distmat[is.na(distmat)] <- 0     # fine tune how we want to deal with NA later 
 cluster <- cluster::agnes(dist(distmat), method = "ward")
+
 D <- dist(PCA_AllData)
 hc <- hclust(D, method = 'average')
 hcdata <- dendro_data_k(cluster, 4)
