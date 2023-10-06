@@ -1,0 +1,9 @@
+numpy 
+pandas
+scikit-learn
+arch
+yfinance
+matplotlib
+optuna
+pygam
+ipykernel
