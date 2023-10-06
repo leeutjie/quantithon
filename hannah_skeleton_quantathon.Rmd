@@ -15,6 +15,11 @@ pacman::p_load(tidyverse, devtools, FactoMineR, factoextra, broom, rmsfuns, read
 # load code scripts for functions
 list.files('code/', full.names = T, recursive = T) %>% as.list() %>% walk(~source(.))
 
+
+data <- read_csv("data/quantathon_hannah.csv")
+pcaseries <- lapply(data[,-1],as.double)
+pcaseries <- data
+
 ```
 
 ```{r dendrogram}
@@ -23,7 +28,7 @@ list.files('code/', full.names = T, recursive = T) %>% as.list() %>% walk(~sourc
 pcaseries <-  pcaseries[, colSums(is.na(pcaseries)) < nrow(pcaseries)]   # remove Columns with only NA
 pcaseries[is.na(pcaseries)] <- 0
 
-demean = scale(pcaseries, center = TRUE, scale = TRUE)
+demean = scale(pcaseries[,-1], center = TRUE, scale = TRUE)
 sigma <- cov(demean)
 
 devtools::source_gist("https://gist.github.com/Nicktz/bd2614f8f8a551881a1dc3c11a1e7268")
