@@ -17,9 +17,17 @@ data <- read_csv("../data/quantathon_hannah.csv")
 data_tr <-
   data %>%
   left_join(ret, by = "date") %>%
-  select(-c(SPX_PX_LAST, LUATTRUU_PX_LAST)) %>%
+  # select(-c(SPX_PX_LAST, LUATTRUU_PX_LAST)) %>%
   relocate(SPX_RETURN, .before = SPX_PX_BID) %>%
   pivot_longer(names(.)[-1]) %>%
   arrange(name, date) %>%
-  mutate(value = log(value) - lag(log(value))) %>%
+  group_by(name) %>%
+  mutate(
+   value = case_when(
+      name %in% str_subset(name, "PX_LAST") ~ log(value),
+      name %in% str_subset(name, "RETURN") ~ value - lag(value)
+    )
+  ) %>%
+  ungroup() %>%
+  pivot_wider() %>%
   write_rds("data.rds")
