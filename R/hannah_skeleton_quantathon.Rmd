@@ -14,14 +14,30 @@ pacman::p_load(tidyverse, devtools, FactoMineR, factoextra, broom, rmsfuns, read
 
 
 # load code scripts for functions
-list.files('code/', full.names = T, recursive = T) %>% as.list() %>% walk(~source(.))
+list.files('./R/code/', full.names = T, recursive = T) %>% 
+  as.list() %>% 
+  walk(~source(.))
 
 
 data <- read_csv("data/quantathon_hannah.csv")
 pcaseries <- data
 PCA_AllData <- data
 
+
+data %>% gather(ticker, value, -date) %>% 
+  ggplot()+
+  geom_line(aes(date, value)) +
+  facet_wrap(~ticker, scales = "free_y")
+
+data %>% 
+  gather(ticker, value, -date) %>%
+  arrange(date) %>% 
+  group_by(ticker) %>% 
+  mutate(Return = log(Price) - log(lag(Price))) 
+
 ```
+
+# All Assets 
 
 ```{r dendrogram}
 # pcaseries <- all data 
@@ -56,15 +72,32 @@ p
 
 
 ```{r pca, echo=FALSE}
+PCA_AllData <- data
+PCA_AllData <- spx
+
+
+# remove Columns with only NA and columns must have at most 150 NA or zero points 
+PCA_AllData <-  PCA_AllData[, colSums(is.na(PCA_AllData)) < nrow(PCA_AllData)] %>%   
+    .[, colSums(is.na(.) | . == 0, na.rm = TRUE) <= 1000] 
+
+# Impute missing values :) 
+options(scipen = 999) 
+PCA_AllData_with_date <- impute_missing_returns(PCA_AllData,
+                               impute_returns_method = "Drawn_Distribution_Collective",
+                               Seed = 1234)
+
+PCA_AllData <- PCA_AllData_with_date %>% select(-date)
 
 # save the supplementary variables' positions:
-SuppPos <- grep("Supp1|supp2", colnames(PCA_AllData)) #|Gold|Oil|Bcom_
+SuppPos <- grep("_CLOSE|_OPEN|_CLOSE|_BID|_ASK|_MID|_LOW|_HIGH|_VOL", colnames(PCA_AllData)) 
+
 
 # PCA_AllData_nodate <- PCA_AllData[,-1]
 df_PCA <- PCA(PCA_AllData, quanti.sup = SuppPos, graph = FALSE,  scale.unit = TRUE)
 
+
 # detect outliers
-outlier(PCA_AllData, plot = TRUE, na.rm = TRUE)
+# outlier(PCA_AllData, plot = TRUE, na.rm = TRUE)
 
 # scree plot
 fviz_screeplot(df_PCA, ncp = 10) 
@@ -93,10 +126,128 @@ demean <- cbind(date, demean) %>% gather(Tickers, Return, -date) %>% tibble::as_
 
 xts_rtn <- demean %>% tbl2xts::tbl_xts(., cols_to_xts = "Return", spread_by = "Tickers")
 
-plotGOGARCH(xts_rtn)
+gog_time_var_cor <- plotGOGARCH(xts_rtn)
+
+
+garch_plot<- ggplot(gog_time_var_cor %>% filter(grepl("SPX_", Pairs), !grepl("_SPX", Pairs))) +
+        geom_line(aes(x = date, y = Rho, colour = Pairs), size = 0.2) +
+        theme_hc() +
+        ggtitle("GARCH correlations to SP 500") +
+        theme(legend.text=element_text(size=6), legend.title = element_blank())
+
 
 ```
 
+
+
+## SP 500
+
+
+```{r spx_dendrogram}
+
+spx <- data[1:10]
+pcaseries <- spx
+PCA_AllData <- spx
+
+# pcaseries <- all data 
+# pcaseries must be in wide format
+pcaseries <-  pcaseries[, colSums(is.na(pcaseries)) < nrow(pcaseries)]   # remove Columns with only NA
+pcaseries[is.na(pcaseries)] <- 0
+
+demean = scale(pcaseries[,-1], center = TRUE, scale = TRUE)
+sigma <- cov(demean)
+
+devtools::source_gist("https://gist.github.com/Nicktz/bd2614f8f8a551881a1dc3c11a1e7268")
+cluster_aux()
+pacman::p_load(cluster, fmxdat)
+
+corr <- cov2cor(sigma)
+distmat <- ((1 - corr)/2)^0.5
+distmat <- ((1 - corr)/2)^0.5
+distmat[is.na(distmat)] <- 0     # fine tune how we want to deal with NA later 
+cluster <- cluster::agnes(dist(distmat), method = "ward")
+
+D <- dist(PCA_AllData)
+hc <- hclust(D, method = 'average')
+hcdata <- dendro_data_k(cluster, 4)
+p <- plot_ggdendro(hcdata, direction = "lr", expand.y = 0.2)
+cols <- c("#a9a9a9", "#1f77b4", "#ff7f0e", "#2ca02c", "#AD3636")
+p <- plot_ggdendro(hcdata, direction = "tb", scale.color = cols,
+    label.size = 2.5, branch.size = 0.5, expand.y = 0.2)
+p <- p + theme_void() + expand_limits(x = c(-1, 32))
+# p + labs(title = "Dendogram of EM Currencies", caption = "Dendogram created using Ward distances and AGNES clustering")
+p
+```
+
+
+```{r spx_pca, echo=FALSE}
+PCA_AllData <- spx
+
+
+# remove Columns with only NA and columns must have at most 150 NA or zero points 
+PCA_AllData <-  PCA_AllData[, colSums(is.na(PCA_AllData)) < nrow(PCA_AllData)] %>%   
+    .[, colSums(is.na(.) | . == 0, na.rm = TRUE) <= 1000] 
+
+# Impute missing values :) 
+options(scipen = 999) 
+PCA_AllData_with_date <- impute_missing_returns(PCA_AllData,
+                               impute_returns_method = "Drawn_Distribution_Collective",
+                               Seed = 1234)
+
+PCA_AllData <- PCA_AllData_with_date %>% select(-date)
+
+# save the supplementary variables' positions:
+SuppPos <- grep("_CLOSE|_OPEN|_CLOSE|_ASK|_MID|_HIGH|_VOL", colnames(PCA_AllData)) 
+
+
+# PCA_AllData_nodate <- PCA_AllData[,-1]
+df_PCA <- PCA(PCA_AllData, quanti.sup = SuppPos, graph = FALSE,  scale.unit = TRUE)
+
+
+# detect outliers
+# outlier(PCA_AllData, plot = TRUE, na.rm = TRUE)
+
+# scree plot
+fviz_screeplot(df_PCA, ncp = 10) 
+
+fviz_pca_var(df_PCA, col.var = c("cos2", "contrib", "coord", 
+    "x", "y")[1]) + scale_color_gradient2(low = "white", mid = "blue", 
+    high = "red", midpoint = 0.5) + theme_minimal()
+
+# Contributions of variables to PC1
+fviz_contrib(df_PCA, choice = "var", axes = 1, top = 10)
+
+# Contributions of variables to PC2
+fviz_contrib(df_PCA, choice = "var", axes = 2, top = 10)
+```
+
+
+```{r spx_garch, echo=FALSE}
+
+demean = scale(PCA_AllData, center = TRUE, scale = TRUE)
+
+demean <-  demean[, colSums(is.na(demean)) < nrow(demean)] # remove col with only na
+
+date <- PCA_AllData_with_date[,1]
+
+demean <- cbind(date, demean) %>% gather(Tickers, Return, -date) %>% tibble::as_tibble()  %>% dplyr::filter(date <= "2008-01-01")
+
+xts_rtn <- demean %>% tbl2xts::tbl_xts(., cols_to_xts = "Return", spread_by = "Tickers")
+
+gog_time_var_cor <- plotGOGARCH(xts_rtn)
+
+
+garch_plot <- 
+  ggplot(gog_time_var_cor %>% 
+           filter(grepl("SPX_PX_LAST_", Pairs),
+                  !grepl("_SPX_PX_LAST", Pairs))) +
+  geom_line(aes(x = date, y = Rho, colour = Pairs), size = 0.2) +
+        theme_hc() +
+        ggtitle("GARCH correlations to SP 500") +
+        theme(legend.text=element_text(size=6), legend.title = element_blank())
+
+
+```
 
 
 ```{r high_vs_low_vol_periods}
@@ -104,7 +255,7 @@ plotGOGARCH(xts_rtn)
 Idxs <- PCA_AllData_with_date %>% 
     gather(Tickers, Return, -date) %>% 
     filter(!is.na(Return)) %>%
-    filter(Tickers !="SouthAfrica") %>% 
+    filter(Tickers !="SPX_PX_LAST") %>% 
     mutate(YearMonth = format(date, "%Y%B"))
 
 
@@ -130,23 +281,23 @@ Idxs <- Idxs %>%
 
 # do periods of high and low volatility in the rand affect the performance of South African bank return prices
 
-zar <- PCA_AllData_with_date %>% 
+spx <- PCA_AllData_with_date %>% 
     gather(Tickers, Return, -date) %>% 
     filter(date > ymd(20080101)) %>% 
-    filter(Tickers == "SouthAfrica")
+    filter(Tickers == "SPX_PX_LAST")
 
 
-ZARSD <- zar %>% 
+spxSD <- spx %>% 
     mutate(YearMonth = format(date, "%Y%B")) %>% 
     group_by(YearMonth) %>% summarise(SD = sd(Return)*sqrt(52)) %>% 
-  # Top Decile Quantile overall (highly volatile month for ZAR:
+  # Top Decile Quantile overall (highly volatile month for spx:
     mutate(TopQtile = quantile(SD, 0.8),
            BotQtile = quantile(SD, 0.2))
 
 
-Hi_Vol <- ZARSD %>% filter(SD > TopQtile) %>% pull(YearMonth)
+Hi_Vol <- spxSD %>% filter(SD > TopQtile) %>% pull(YearMonth)
 
-Low_Vol <- ZARSD %>% filter(SD < BotQtile) %>% pull(YearMonth)
+Low_Vol <- spxSD %>% filter(SD < BotQtile) %>% pull(YearMonth)
 
 perf_hi <- Perf_comparisons(Idxs, YMs = Hi_Vol, Alias = "High_Vol")
 
@@ -155,13 +306,12 @@ perf_lo <- Perf_comparisons(Idxs, YMs = Low_Vol, Alias = "Low_Vol")
 
 
 ```{r high, fig.cap = "Standard deviation and correlation ratio in periods of high Rand volatility \\label{high}"}
-kable(perf_hi, caption = "Standard deviation and correlation ratio in periods of high Rand volatility \\label{high}")
+kable(perf_hi, caption = "Standard deviation and correlation ratio in periods of high volatility \\label{high}")
 ```
 
 
 ```{r low, fig.cap = "Standard deviation and correlation ratio in periods of low Rand volatility  \\label{low}"}
-kable(perf_lo, caption = "Standard deviation and correlation ratio in periods of low Rand volatility \\label{low}")
+kable(perf_lo, caption = "Standard deviation and correlation ratio in periods of low volatility \\label{low}")
 ```
-
 
 
