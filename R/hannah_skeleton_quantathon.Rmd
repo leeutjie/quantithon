@@ -189,14 +189,23 @@ variance_gk %>%
   geom_line(aes(color=entity))
 
 
+dv_var <- rollapply(data_tr$SPX_PX_LAST,width = 3, FUN = var, align = "right") %>% 
+  as_tibble() 
 
+dates <- select(data_tr, date) %>% filter(date >= '2000-01-05')
 
-
-xas <- spx[,c(1:2)] %>% 
-  left_join(variance_gk %>% mutate(date = spx$date), by = "date")
-
-         # SPX_PX_LAST_var = rollapply(spx$SPX_PX_LAST,width = 3, FUN = var, align = "left"))
-
+dv_var <- dv_var %>% 
+  bind_cols(dates) %>% 
+  rename(VAR_SPX_PX_LAST = value)
+  
+  
+spx <-  
+  data_tr %>% 
+  select(date, SPX_PX_LAST) %>% 
+  mutate(SPX_PX_LAST = log(SPX_PX_LAST)- lag(log(SPX_PX_LAST))) %>% 
+  # mutate(SPX_PX_LAST_var = )
+  left_join(variance_gk %>% mutate(date = spx$date), by = "date") %>% 
+  left_join(dv_var, by = "date")
 
 
 
@@ -208,6 +217,7 @@ PCA_AllData <- spx
 # pcaseries must be in wide format
 pcaseries <-  pcaseries[, colSums(is.na(pcaseries)) < nrow(pcaseries)]   # remove Columns with only NA
 pcaseries[is.na(pcaseries)] <- 0
+PCA_AllData[is.na(PCA_AllData)] <- 0
 
 demean = scale(pcaseries[,-1], center = TRUE, scale = TRUE)
 sigma <- cov(demean)
@@ -252,7 +262,8 @@ PCA_AllData_with_date <- impute_missing_returns(PCA_AllData,
 PCA_AllData <- PCA_AllData_with_date %>% select(-date)
 
 # save the supplementary variables' positions:
-SuppPos <- grep("_CLOSE|_OPEN|_CLOSE|_ASK|_MID|_HIGH|_VOL", colnames(PCA_AllData)) 
+# SuppPos <- grep("_CLOSE|_OPEN|_CLOSE|_ASK|_MID|_HIGH|_VOL", colnames(PCA_AllData)) 
+SuppPos <- grep("_5|_21|_63|_126|_189|_252", colnames(PCA_AllData)) # least important gk var according to dendr0
 
 
 # PCA_AllData_nodate <- PCA_AllData[,-1]
@@ -285,7 +296,8 @@ demean <-  demean[, colSums(is.na(demean)) < nrow(demean)] # remove col with onl
 
 date <- PCA_AllData_with_date[,1]
 
-demean <- cbind(date, demean) %>% gather(Tickers, Return, -date) %>% tibble::as_tibble()  %>% dplyr::filter(date <= "2008-01-01")
+demean <- cbind(date, demean) %>% gather(Tickers, Return, -date) %>% tibble::as_tibble() 
+# %>% dplyr::filter(date <= "2008-01-01")
 
 xts_rtn <- demean %>% tbl2xts::tbl_xts(., cols_to_xts = "Return", spread_by = "Tickers")
 
@@ -294,8 +306,8 @@ gog_time_var_cor <- plotGOGARCH(xts_rtn)
 
 garch_plot <- 
   ggplot(gog_time_var_cor %>% 
-           filter(grepl("SPX_PX_LAST_", Pairs),
-                  !grepl("_SPX_PX_LAST", Pairs))) +
+           filter(grepl("VAR_SPX_PX_LAST_", Pairs),
+                  !grepl("_VAR_SPX_PX_LAST", Pairs))) +
   geom_line(aes(x = date, y = Rho, colour = Pairs), size = 0.2) +
         theme_hc() +
         ggtitle("GARCH correlations to SP 500") +
