@@ -12,7 +12,7 @@ ret <-
   select(date = datestamp, item, value) %>%
   pivot_wider(names_from = "item")
 
-data <- read_csv("../data/quantathon_hannah.csv")
+data <- read_csv("./data/quantathon_hannah.csv")
 
 data_tr <-
   data %>%

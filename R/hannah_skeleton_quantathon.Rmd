@@ -24,7 +24,8 @@ pcaseries <- data
 PCA_AllData <- data
 
 
-data %>% gather(ticker, value, -date) %>% 
+data %>% 
+  gather(ticker, value, -date) %>% 
   ggplot()+
   geom_line(aes(date, value)) +
   facet_wrap(~ticker, scales = "free_y")
@@ -144,8 +145,62 @@ garch_plot<- ggplot(gog_time_var_cor %>% filter(grepl("SPX_", Pairs), !grepl("_S
 
 
 ```{r spx_dendrogram}
+library(RcppRoll)
+
+data_tr %>% ggplot() +
+  geom_line(aes(date, value)) +
+  facet_wrap(~name, scales = "free_y")
+
+# spx <- data[1:10]
+spx <- data_tr %>% filter(grepl("SPX", name))
+spx <- spx %>% spread(name, value)
+
 
 spx <- data[1:10]
+
+lookback_period <- c(1,5,21,3*(1:4)*21)
+nLookBack <- length(lookback_period)
+nobs <- nrow(spx[,-1])
+variance_gk <- matrix(NA,nobs,nLookBack)
+
+#Extracting text after last period (.) in string
+colnames(spx) <- sub('.*\\.',"",colnames(spx))
+variance_data <- 
+  spx %>% 
+  as.data.frame() %>% 
+  mutate(date = index(spx),
+         c = log(SPX_PX_CLOSE_1D) - log(SPX_PX_OPEN),
+         h = log(SPX_PX_HIGH) - log(SPX_PX_LOW),
+         l = log(SPX_PX_LOW) - log(SPX_PX_OPEN)) %>% 
+  mutate(GK = 0.5*(h-l)^2-(2*log(2)-1)*c^2)
+
+for (j in 1:nLookBack) {
+  variance_gk[,j] <- roll_meanr(lag(variance_data$GK),n = lookback_period[j])
+}
+
+colnames(variance_gk) <- paste0("GK_",lookback_period)
+
+variance_gk <- data.frame(date=variance_data$date,variance_gk)
+
+#Plot Garman-Klass volatility
+variance_gk %>% 
+  pivot_longer(cols = !date, names_to = "entity",values_to = "variance") %>% 
+  ggplot(aes(x=date,y=sqrt(252)*sqrt(variance), group=entity))+
+  geom_line(aes(color=entity))
+
+
+
+
+
+xas <- spx[,c(1:2)] %>% 
+  left_join(variance_gk %>% mutate(date = spx$date), by = "date")
+
+         # SPX_PX_LAST_var = rollapply(spx$SPX_PX_LAST,width = 3, FUN = var, align = "left"))
+
+
+
+
+
 pcaseries <- spx
 PCA_AllData <- spx
 
