@@ -1,0 +1,157 @@
+---
+title: "On Realised Volatility: Daily Range Data"
+output: html_document
+---
+
+```{r setup packages, include=FALSE}
+source("../config.R")
+```
+
+## Overview
+
+In this note we look at alternative data for predicting realised volatility. This moves us beyond only using daily colsing price returns.
+
+## Yahoo Finance Daily Range Data
+
+We start by considering the price at the beginning of the day Open, the price in the end of the day Close, the highest price of the day High, and the lowest price of the day Low. Sometimes we also have access to the Volume traded over each day.
+
+```{r get_data}
+asset_symbol <- '^SPX'
+asset_data <- getSymbols(asset_symbol,src='yahoo',from = "1995-01-04",auto.assign=FALSE)
+
+#Candlestick Chart
+chartSeries(asset_data,name="S&P 500 ETF",theme = 'white')
+
+```
+
+Let us take a closer look by plotting a smaller subset.
+
+```{r data_subset}
+chartSeries(asset_data,name="S&P 500 ETF",theme = 'white',subset='2023::2023')
+```
+
+The candle sticks show more information about the variability of returns than only using close-to-close prices. Variations in volume during different trading periods may give rise to varying levels of future realised volatility.
+
+Next we calculate the Garman-Klass estimates of volatility as well as log of cumulative volume.
+
+```{r gk_model}
+lookback_period <- c(1,5,21,3*(1:4)*21)
+nLookBack <- length(lookback_period)
+nobs <- nrow(asset_data)
+variance_gk <- matrix(NA,nobs,nLookBack)
+
+#Extracting text after last period (.) in string
+colnames(asset_data) <- sub('.*\\.',"",colnames(asset_data))
+variance_data <- 
+  asset_data %>% 
+  as.data.frame() %>% 
+  mutate(datestamp = index(asset_data),
+         c = log(Close) - log(Open),
+         h = log(High) - log(Low),
+         l = log(Low) - log(Open)) %>% 
+  mutate(GK = 0.5*(h-l)^2-(2*log(2)-1)*c^2)
+
+for (j in 1:nLookBack) {
+  variance_gk[,j] <- roll_meanr(lag(variance_data$GK),n = lookback_period[j])
+}
+colnames(variance_gk) <- paste0("GK_",lookback_period)
+variance_gk <- data.frame(datestamp=variance_data$datestamp,variance_gk)
+
+#Plot Garman-Klass volatility
+variance_gk %>% 
+  pivot_longer(cols = !datestamp, names_to = "entity",values_to = "variance") %>% 
+  ggplot(aes(x=datestamp,y=sqrt(252)*sqrt(variance), group=entity))+
+  geom_line(aes(color=entity))
+
+```
+
+Below we depict some candidate volume based factors.
+
+```{r volume_model}
+volume_tic <- matrix(NA,nobs,nLookBack)
+
+for (j in 1:nLookBack) {
+  volume_tic[,j] <- 
+    roll_meanr(lag(variance_data$Volume),n = lookback_period[j])/roll_medianr(lag(variance_data$Volume),n = 253)
+}
+colnames(volume_tic) <- paste0("volume_",lookback_period)
+volume_tic <- data.frame(datestamp=variance_data$datestamp,volume_tic)
+
+#Plot Garman-Klass volatility
+volume_tic %>% 
+  pivot_longer(cols = !datestamp, names_to = "entity",values_to = "volume") %>% 
+  ggplot(aes(x=datestamp,y=volume, group=entity))+
+  geom_line(aes(color=entity))
+
+```
+
+Other assets relevant to us on Yahoo Finance are tabulated below.
+
+```{r yahoo_data}
+yahoo_tickers <-
+  tibble::tribble(
+    ~symbol, ~Asset,
+    "^DJI", "Dow Jones Industrial Average", 
+    "^IXIC", "NASDAQ Composite", 
+    "^VIX", "CBOE Volatility Index", 
+    "^HSI", "HANG SENG INDEX", 
+    "000001.SS", "SSE Composite Index", 
+    "399001.SZ", "Shenzhen Index", 
+    "^KS11", "KOSPI Composite Index", 
+    "^J203.JO", "JSE All Share", 
+    "^N225", "Nikkei 225", 
+    "^FTSE", "FTSE 100", 
+    "^FCHI", "CAC 40", 
+    "^GDAXI", "DAX PERFORMANCE-INDEX", 
+    "^STOXX50E", "ESTX 50 PR.EUR", 
+    "^FVX", "Treasury Yield 5 Years", 
+    "^TNX", "CBOE Interest Rate 10 Year T No", 
+    "^TYX", "Treasury Yield 30 Years", 
+    "^J253.JO", "SA Listed Property Index")
+yahoo_tickers
+```
+
+
+## SA Swaps Daily Range Data
+
+Data on South African government bonds (SAGBs) is a more difficult to come by. In cases like these we can use data from related assets to enrich our dataset.
+
+Data on South African nominal swaps is available on Bloomberg to enable us to calculate the Garman-Klass estimator. We can use these volatilities as predictors of constant maturity SAGBs.
+
+```{r swap_data}
+tgt_entity <- "SASW3 Curncy"
+tgt_item <- c("PX_OPEN","PX_HIGH","PX_LOW","PX_LAST")
+swap_data <- 
+  pimR::fetch(
+    entity = tgt_entity,
+    item = tgt_item,
+    minimal = FALSE
+  ) %>% 
+  select(c(datestamp,item,value)) %>% 
+  unique()
+
+swap_data_wider <- 
+  swap_data %>% 
+  pivot_wider(id_cols = datestamp, names_from = item) %>% 
+  drop_na()
+
+col_names <- gsub("_",
+                  ".",
+                  gsub("LAST","CLOSE",colnames(swap_data_wider))
+                  )
+colnames(swap_data_wider) <- col_names
+swap_data_xts <- xts(swap_data_wider %>% select(-datestamp),
+                     order.by=swap_data_wider$datestamp)
+
+chartSeries(swap_data_xts,name="3-Year Swap",theme = 'white')
+
+```
+It is always to plot your data. Obvious data errors can be spotted this way and a rule on how to handle such cases devised appropriately.
+
+Let us take a closer look by plotting a more recent subset.
+
+```{r swaps_subset}
+chartSeries(swap_data_xts,name="3-Year Swap",theme = 'white',subset='2023::2023')
+```
+
+The intraday range data is also available for the 5, 7, 10, 15, 20 and 25 year swaps.
