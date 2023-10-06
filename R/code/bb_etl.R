@@ -14,9 +14,12 @@ ret <-
 
 data <- read_csv("../data/quantathon_hannah.csv")
 
-data %>%
+data_tr <-
+  data %>%
   left_join(ret, by = "date") %>%
   select(-c(SPX_PX_LAST, LUATTRUU_PX_LAST)) %>%
   relocate(SPX_RETURN, .before = SPX_PX_BID) %>%
+  pivot_longer(names(.)[-1]) %>%
+  arrange(name, date) %>%
+  mutate(value = log(value) - lag(log(value))) %>%
   write_rds("data.rds")
-
