@@ -50,14 +50,7 @@ plotGOGARCH <- function(data){
 
     # ------------------------ Step 5: Plot
 
-    # Rand <- ggplot(gog.time.var.cor %>% filter(grepl("ZAR_", Pairs), !grepl("_ZAR", Pairs))) +
-    Rand <- ggplot(gog.time.var.cor %>% filter(grepl("SouthAfrica_", Pairs), !grepl("_SouthAfrica", Pairs))) +
-    # Rand <- ggplot(gog.time.var.cor %>% filter(grepl("SouthAfrica_", Pairs), !grepl("_SouthAfrica", Pairs))) +
-        geom_line(aes(x = date, y = Rho, colour = Pairs), size = 0.2) +
-        theme_hc() +
-        ggtitle("GARCH correlations to ZAR") +
-        theme(legend.text=element_text(size=6), legend.title = element_blank())
-    Rand
+    gog.time.var.cor
 
 }
 
