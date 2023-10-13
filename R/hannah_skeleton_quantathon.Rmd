@@ -9,17 +9,18 @@ output: pdf_document
 knitr::opts_chunk$set(echo = TRUE)
 
 library(pacman)
-pacman::p_load(tidyverse, devtools, FactoMineR, factoextra, broom, rmsfuns, readr, stochvol, tsBSS, psych, rugarch, rmgarch, forecast, tbl2xts, lubridate, PerformanceAnalytics, ggthemes, MTS, robustbase, cowplot, knitr)
+pacman::p_load(tidyverse, devtools, FactoMineR, factoextra, broom, rmsfuns, readr, stochvol, tsBSS, psych, rugarch, rmgarch, forecast, tbl2xts, lubridate, PerformanceAnalytics, ggthemes, MTS, robustbase, cowplot, knitr, RcppRoll)
 # pacman::p_load_gh("Nicktz/fmxdat")
 
 
 # load code scripts for functions
-list.files('./R/code/', full.names = T, recursive = T) %>% 
+# list.files('./R/code/', full.names = T, recursive = T) %>% 
+list.files('C:/Users/hannah.denobrega/OneDrive - Prescient/projects/quantithon/R/code/', full.names = T, recursive = T) %>% 
   as.list() %>% 
   walk(~source(.))
 
 
-data <- read_csv("data/quantathon_hannah.csv")
+# data <- read_csv("data/quantathon_hannah.csv")
 pcaseries <- data
 PCA_AllData <- data
 
@@ -30,11 +31,10 @@ data %>%
   geom_line(aes(date, value)) +
   facet_wrap(~ticker, scales = "free_y")
 
-data %>% 
-  gather(ticker, value, -date) %>%
-  arrange(date) %>% 
-  group_by(ticker) %>% 
-  mutate(Return = log(Price) - log(lag(Price))) 
+
+data_tr %>% ggplot() +
+  geom_line(aes(date, value)) +
+  facet_wrap(~name, scales = "free_y")
 
 ```
 
@@ -145,16 +145,6 @@ garch_plot<- ggplot(gog_time_var_cor %>% filter(grepl("SPX_", Pairs), !grepl("_S
 
 
 ```{r spx_dendrogram}
-library(RcppRoll)
-
-data_tr %>% ggplot() +
-  geom_line(aes(date, value)) +
-  facet_wrap(~name, scales = "free_y")
-
-# spx <- data[1:10]
-spx <- data_tr %>% filter(grepl("SPX", name))
-spx <- spx %>% spread(name, value)
-
 
 spx <- data[1:10]
 
@@ -240,7 +230,6 @@ cols <- c("#a9a9a9", "#1f77b4", "#ff7f0e", "#2ca02c", "#AD3636")
 p <- plot_ggdendro(hcdata, direction = "tb", scale.color = cols,
     label.size = 2.5, branch.size = 0.5, expand.y = 0.2)
 p <- p + theme_void() + expand_limits(x = c(-1, 32))
-# p + labs(title = "Dendogram of EM Currencies", caption = "Dendogram created using Ward distances and AGNES clustering")
 p
 ```
 
@@ -270,9 +259,6 @@ SuppPos <- grep("_5|_21|_63|_126|_189|_252", colnames(PCA_AllData)) # least impo
 df_PCA <- PCA(PCA_AllData, quanti.sup = SuppPos, graph = FALSE,  scale.unit = TRUE)
 
 
-# detect outliers
-# outlier(PCA_AllData, plot = TRUE, na.rm = TRUE)
-
 # scree plot
 fviz_screeplot(df_PCA, ncp = 10) 
 
@@ -290,6 +276,7 @@ fviz_contrib(df_PCA, choice = "var", axes = 2, top = 10)
 
 ```{r spx_garch, echo=FALSE}
 
+
 demean = scale(PCA_AllData, center = TRUE, scale = TRUE)
 
 demean <-  demean[, colSums(is.na(demean)) < nrow(demean)] # remove col with only na
@@ -298,6 +285,14 @@ date <- PCA_AllData_with_date[,1]
 
 demean <- cbind(date, demean) %>% gather(Tickers, Return, -date) %>% tibble::as_tibble() 
 # %>% dplyr::filter(date <= "2008-01-01")
+
+# demean <- cbind(date, demean) %>% 
+#   gather(Tickers, Return, -date) %>% 
+#   tibble::as_tibble()%>% dplyr::filter(date <= "2008-01-01")
+# 
+# demean <- cbind(date, demean) %>% 
+#   gather(Tickers, Return, -date) %>% 
+#   tibble::as_tibble() %>% dplyr::filter(date <= "2008-01-01")
 
 xts_rtn <- demean %>% tbl2xts::tbl_xts(., cols_to_xts = "Return", spread_by = "Tickers")
 
@@ -313,11 +308,12 @@ garch_plot <-
         ggtitle("GARCH correlations to SP 500") +
         theme(legend.text=element_text(size=6), legend.title = element_blank())
 
+garch_plot
 
 ```
 
 
-```{r high_vs_low_vol_periods}
+```{r spx_high_vs_low_vol_periods}
 
 Idxs <- PCA_AllData_with_date %>% 
     gather(Tickers, Return, -date) %>% 
@@ -348,13 +344,13 @@ Idxs <- Idxs %>%
 
 # do periods of high and low volatility in the rand affect the performance of South African bank return prices
 
-spx <- PCA_AllData_with_date %>% 
+spx_vol <- PCA_AllData_with_date %>% 
     gather(Tickers, Return, -date) %>% 
     filter(date > ymd(20080101)) %>% 
     filter(Tickers == "SPX_PX_LAST")
 
 
-spxSD <- spx %>% 
+spxSD <- spx_vol %>% 
     mutate(YearMonth = format(date, "%Y%B")) %>% 
     group_by(YearMonth) %>% summarise(SD = sd(Return)*sqrt(52)) %>% 
   # Top Decile Quantile overall (highly volatile month for spx:
@@ -372,13 +368,595 @@ perf_lo <- Perf_comparisons(Idxs, YMs = Low_Vol, Alias = "Low_Vol")
 ```
 
 
-```{r high, fig.cap = "Standard deviation and correlation ratio in periods of high Rand volatility \\label{high}"}
+```{r spx_high, fig.cap = "Standard deviation and correlation ratio in periods of high Rand volatility \\label{high}"}
 kable(perf_hi, caption = "Standard deviation and correlation ratio in periods of high volatility \\label{high}")
 ```
 
 
-```{r low, fig.cap = "Standard deviation and correlation ratio in periods of low Rand volatility  \\label{low}"}
+```{r spx_low, fig.cap = "Standard deviation and correlation ratio in periods of low Rand volatility  \\label{low}"}
 kable(perf_lo, caption = "Standard deviation and correlation ratio in periods of low volatility \\label{low}")
 ```
+
+
+
+
+## USGG5Y
+
+```{r USGG5YR_dendrogram}
+
+USGG5YR <- data %>% 
+  gather(name, value, -date) %>% 
+  filter(grepl("USGG5YR", name)) %>% 
+  spread(name, value)
+
+lookback_period <- c(1,5,21,3*(1:4)*21)
+nLookBack <- length(lookback_period)
+nobs <- nrow(USGG5YR[,-1])
+variance_gk <- matrix(NA,nobs,nLookBack)
+
+#Extracting text after last period (.) in string
+colnames(USGG5YR) <- sub('.*\\.',"",colnames(USGG5YR))
+variance_data <- 
+  USGG5YR %>% 
+  as.data.frame() %>% 
+  mutate(date = index(USGG5YR),
+         c = log(USGG5YR_PX_CLOSE_1D) - log(USGG5YR_PX_OPEN),
+         h = log(USGG5YR_PX_HIGH) - log(USGG5YR_PX_LOW),
+         l = log(USGG5YR_PX_LOW) - log(USGG5YR_PX_OPEN)) %>% 
+  mutate(GK = 0.5*(h-l)^2-(2*log(2)-1)*c^2)
+
+for (j in 1:nLookBack) {
+  variance_gk[,j] <- roll_meanr(lag(variance_data$GK),n = lookback_period[j])
+}
+
+colnames(variance_gk) <- paste0("GK_",lookback_period)
+
+variance_gk <- data.frame(date=variance_data$date,variance_gk)
+
+#Plot Garman-Klass volatility
+variance_gk %>% 
+  pivot_longer(cols = !date, names_to = "entity",values_to = "variance") %>% 
+  ggplot(aes(x=date,y=sqrt(252)*sqrt(variance), group=entity))+
+  geom_line(aes(color=entity))
+
+
+dv_var <- rollapply(data_tr$USGG5YR_PX_LAST,width = 3, FUN = var, align = "right") %>% 
+  as_tibble() 
+
+dates <- select(data_tr, date) %>% filter(date >= '2000-01-05')
+
+dv_var <- dv_var %>% 
+  bind_cols(dates) %>% 
+  rename(VAR_USGG5YR_PX_LAST = value)
+  
+  
+USGG5YR <-  
+  data_tr %>% 
+  select(date, USGG5YR_PX_LAST) %>% 
+  mutate(USGG5YR_PX_LAST = log(USGG5YR_PX_LAST)- lag(log(USGG5YR_PX_LAST))) %>% 
+  # mutate(SPX_PX_LAST_var = )
+  left_join(variance_gk %>% mutate(date = USGG5YR$date), by = "date") %>% 
+  left_join(dv_var, by = "date")
+
+
+
+
+pcaseries <- USGG5YR
+PCA_AllData <- USGG5YR
+
+# pcaseries <- all data 
+# pcaseries must be in wide format
+pcaseries <-  pcaseries[, colSums(is.na(pcaseries)) < nrow(pcaseries)]   # remove Columns with only NA
+pcaseries[is.na(pcaseries)] <- 0
+PCA_AllData[is.na(PCA_AllData)] <- 0
+
+demean = scale(pcaseries[,-1], center = TRUE, scale = TRUE)
+sigma <- cov(demean)
+
+devtools::source_gist("https://gist.github.com/Nicktz/bd2614f8f8a551881a1dc3c11a1e7268")
+cluster_aux()
+pacman::p_load(cluster, fmxdat)
+
+corr <- cov2cor(sigma)
+distmat <- ((1 - corr)/2)^0.5
+distmat <- ((1 - corr)/2)^0.5
+distmat[is.na(distmat)] <- 0     # fine tune how we want to deal with NA later 
+cluster <- cluster::agnes(dist(distmat), method = "ward")
+
+D <- dist(PCA_AllData)
+hc <- hclust(D, method = 'average')
+hcdata <- dendro_data_k(cluster, 4)
+p <- plot_ggdendro(hcdata, direction = "lr", expand.y = 0.2)
+cols <- c("#a9a9a9", "#1f77b4", "#ff7f0e", "#2ca02c", "#AD3636")
+p <- plot_ggdendro(hcdata, direction = "tb", scale.color = cols,
+    label.size = 2.5, branch.size = 0.5, expand.y = 0.2)
+p <- p + theme_void() + expand_limits(x = c(-1, 32))
+p
+```
+
+```{r}
+PCA_AllData <- USGG5YR
+
+
+# remove Columns with only NA and columns must have at most 150 NA or zero points 
+PCA_AllData <-  PCA_AllData[, colSums(is.na(PCA_AllData)) < nrow(PCA_AllData)] %>%   
+    .[, colSums(is.na(.) | . == 0, na.rm = TRUE) <= 1000] 
+
+# Impute missing values :) 
+options(scipen = 999) 
+PCA_AllData_with_date <- impute_missing_returns(PCA_AllData,
+                               impute_returns_method = "Drawn_Distribution_Collective",
+                               Seed = 1234)
+```
+
+
+```{r USGG5YR_garch, echo=FALSE}
+
+demean = scale(PCA_AllData[,-1], center = TRUE, scale = TRUE)
+
+demean <-  demean[, colSums(is.na(demean)) < nrow(demean)] # remove col with only na
+
+date <- PCA_AllData_with_date[,1]
+
+demean <- cbind(date, demean) %>% 
+  gather(Tickers, Return, -date) %>% 
+  tibble::as_tibble() 
+
+
+# demean <- cbind(date, demean) %>% 
+#   gather(Tickers, Return, -date) %>% 
+#   tibble::as_tibble()%>% dplyr::filter(date <= "2008-01-01")
+# 
+# demean <- cbind(date, demean) %>% 
+#   gather(Tickers, Return, -date) %>% 
+#   tibble::as_tibble() %>% dplyr::filter(date <= "2008-01-01")
+
+xts_rtn <- demean %>% tbl2xts::tbl_xts(., cols_to_xts = "Return", spread_by = "Tickers") %>% na.omit()
+
+gog_time_var_cor <- plotGOGARCH(xts_rtn)
+
+
+garch_plot <- 
+  ggplot(gog_time_var_cor %>% 
+           filter(grepl("USGG5YR_PX_LAST_", Pairs),
+                  !grepl("_USGG5YR_PX_LAST", Pairs))) +
+  geom_line(aes(x = date, y = Rho, colour = Pairs), size = 0.2) +
+        theme_hc() +
+        ggtitle("GARCH correlations to US 5 Year Government Bonds") +
+        theme(legend.text=element_text(size=6), legend.title = element_blank())
+
+garch_plot
+
+```
+
+
+```{r USGG5YR_high_vs_low_vol_periods}
+
+Idxs <- PCA_AllData_with_date %>% 
+    gather(Tickers, Return, -date) %>% 
+    filter(!is.na(Return)) %>%
+    filter(Tickers !="USGG5YR_PX_LAST") %>% 
+    mutate(YearMonth = format(date, "%Y%B"))
+
+
+# Consider only indexes with data from before 20080101, and use this as a common start date too...:
+# Can you argue why? - beacuase of GFC
+Idx_Cons <- Idxs %>% 
+    group_by(Tickers) %>% 
+    filter(date == first(date)) %>% 
+    ungroup() %>% 
+    filter(date < ymd(20080101)) %>%  
+    pull(Tickers) %>% unique # make a list of all the tickers that exist pre-GFC
+
+Idxs <- Idxs %>% 
+    filter(Tickers %in% Idx_Cons) %>%  # only keep tickers that existed pre-GFC
+    filter(date > ymd(20080101))
+
+# Winzorising: mitigate the effect of extreme values
+Idxs <- Idxs %>% 
+    group_by(Tickers) %>% 
+    mutate(Top = quantile(Return, 0.99), Bot = quantile(Return, 0.01)) %>% 
+    mutate(Return = ifelse(Return > Top, Top, ifelse(Return < Bot, Bot, Return))) %>% 
+    ungroup()
+
+# do periods of high and low volatility in the rand affect the performance of South African bank return prices
+
+USGG5YR_vol <- PCA_AllData_with_date %>% 
+    gather(Tickers, Return, -date) %>% 
+    filter(date > ymd(20080101)) %>% 
+    filter(Tickers == "USGG5YR_PX_LAST")
+
+
+USGG5YRSD <- USGG5YR_vol %>% 
+    mutate(YearMonth = format(date, "%Y%B")) %>% 
+    group_by(YearMonth) %>% summarise(SD = sd(Return)*sqrt(52)) %>% 
+  # Top Decile Quantile overall (highly volatile month for spx:
+    mutate(TopQtile = quantile(SD, 0.8),
+           BotQtile = quantile(SD, 0.2))
+
+
+Hi_Vol <- USGG5YRSD %>% filter(SD > TopQtile) %>% pull(YearMonth)
+
+Low_Vol <- USGG5YRSD %>% filter(SD < BotQtile) %>% pull(YearMonth)
+
+perf_hi <- Perf_comparisons(Idxs, YMs = Hi_Vol, Alias = "High_Vol")
+
+perf_lo <- Perf_comparisons(Idxs, YMs = Low_Vol, Alias = "Low_Vol")
+```
+
+
+```{r spx_high, fig.cap = "Standard deviation and correlation ratio in periods of high Rand volatility \\label{high}"}
+kable(perf_hi, caption = "Standard deviation and correlation ratio in periods of high volatility \\label{high}")
+```
+
+
+```{r spx_low, fig.cap = "Standard deviation and correlation ratio in periods of low Rand volatility  \\label{low}"}
+kable(perf_lo, caption = "Standard deviation and correlation ratio in periods of low volatility \\label{low}")
+```
+
+
+## EURUSD
+
+
+```{r USGG5YR_dendrogram}
+
+EURUSD <- data %>% 
+  gather(name, value, -date) %>% 
+  filter(grepl("EURUSD", name)) %>% 
+  spread(name, value)
+
+lookback_period <- c(1,5,21,3*(1:4)*21)
+nLookBack <- length(lookback_period)
+nobs <- nrow(EURUSD[,-1])
+variance_gk <- matrix(NA,nobs,nLookBack)
+
+#Extracting text after last period (.) in string
+colnames(EURUSD) <- sub('.*\\.',"",colnames(EURUSD))
+variance_data <- 
+  EURUSD %>% 
+  as.data.frame() %>% 
+  mutate(date = index(EURUSD),
+         c = log(EURUSD_PX_CLOSE_1D) - log(EURUSD_PX_OPEN),
+         h = log(EURUSD_PX_HIGH) - log(EURUSD_PX_LOW),
+         l = log(EURUSD_PX_LOW) - log(EURUSD_PX_OPEN)) %>% 
+  mutate(GK = 0.5*(h-l)^2-(2*log(2)-1)*c^2)
+
+for (j in 1:nLookBack) {
+  variance_gk[,j] <- roll_meanr(lag(variance_data$GK),n = lookback_period[j])
+}
+
+colnames(variance_gk) <- paste0("GK_",lookback_period)
+
+variance_gk <- data.frame(date=variance_data$date,variance_gk)
+
+#Plot Garman-Klass volatility
+variance_gk %>% 
+  pivot_longer(cols = !date, names_to = "entity",values_to = "variance") %>% 
+  ggplot(aes(x=date,y=sqrt(252)*sqrt(variance), group=entity))+
+  geom_line(aes(color=entity))
+
+
+dv_var <- rollapply(data_tr$EURUSD_PX_LAST,width = 3, FUN = var, align = "right") %>% 
+  as_tibble() 
+
+dates <- select(data_tr, date) %>% filter(date >= '2000-01-05')
+
+dv_var <- dv_var %>% 
+  bind_cols(dates) %>% 
+  rename(VAR_EURUSD_PX_LAST = value)
+  
+  
+EURUSDR <-  
+  data_tr %>% 
+  select(date, EURUSD_PX_LAST) %>% 
+  mutate(EURUSD_PX_LAST = log(EURUSD_PX_LAST)- lag(log(EURUSD_PX_LAST))) %>% 
+  # mutate(SPX_PX_LAST_var = )
+  left_join(variance_gk %>% mutate(date = EURUSD$date), by = "date") %>% 
+  left_join(dv_var, by = "date")
+
+
+
+
+pcaseries <- EURUSD
+PCA_AllData <- EURUSD
+
+# pcaseries <- all data 
+# pcaseries must be in wide format
+pcaseries <-  pcaseries[, colSums(is.na(pcaseries)) < nrow(pcaseries)]   # remove Columns with only NA
+pcaseries[is.na(pcaseries)] <- 0
+PCA_AllData[is.na(PCA_AllData)] <- 0
+
+demean = scale(pcaseries[,-1], center = TRUE, scale = TRUE)
+sigma <- cov(demean)
+
+devtools::source_gist("https://gist.github.com/Nicktz/bd2614f8f8a551881a1dc3c11a1e7268")
+cluster_aux()
+pacman::p_load(cluster, fmxdat)
+
+corr <- cov2cor(sigma)
+distmat <- ((1 - corr)/2)^0.5
+distmat <- ((1 - corr)/2)^0.5
+distmat[is.na(distmat)] <- 0     # fine tune how we want to deal with NA later 
+cluster <- cluster::agnes(dist(distmat), method = "ward")
+
+D <- dist(PCA_AllData)
+hc <- hclust(D, method = 'average')
+hcdata <- dendro_data_k(cluster, 4)
+p <- plot_ggdendro(hcdata, direction = "lr", expand.y = 0.2)
+cols <- c("#a9a9a9", "#1f77b4", "#ff7f0e", "#2ca02c", "#AD3636")
+p <- plot_ggdendro(hcdata, direction = "tb", scale.color = cols,
+    label.size = 2.5, branch.size = 0.5, expand.y = 0.2)
+p <- p + theme_void() + expand_limits(x = c(-1, 32))
+p
+```
+
+```{r}
+PCA_AllData <- EURUSD
+
+
+# remove Columns with only NA and columns must have at most 150 NA or zero points 
+PCA_AllData <-  PCA_AllData[, colSums(is.na(PCA_AllData)) < nrow(PCA_AllData)] %>%   
+    .[, colSums(is.na(.) | . == 0, na.rm = TRUE) <= 1000] 
+
+# Impute missing values :) 
+options(scipen = 999) 
+PCA_AllData_with_date <- impute_missing_returns(PCA_AllData,
+                               impute_returns_method = "Drawn_Distribution_Collective",
+                               Seed = 1234)
+```
+
+
+```{r USGG5YR_garch, echo=FALSE}
+
+demean = scale(PCA_AllData[,-1], center = TRUE, scale = TRUE)
+
+demean <-  demean[, colSums(is.na(demean)) < nrow(demean)] # remove col with only na
+
+date <- PCA_AllData_with_date[,1]
+
+demean <- cbind(date, demean) %>% 
+  gather(Tickers, Return, -date) %>% 
+  tibble::as_tibble() 
+
+
+# demean <- cbind(date, demean) %>% 
+#   gather(Tickers, Return, -date) %>% 
+#   tibble::as_tibble()%>% dplyr::filter(date <= "2008-01-01")
+# 
+# demean <- cbind(date, demean) %>% 
+#   gather(Tickers, Return, -date) %>% 
+#   tibble::as_tibble() %>% dplyr::filter(date <= "2008-01-01")
+
+xts_rtn <- demean %>% tbl2xts::tbl_xts(., cols_to_xts = "Return", spread_by = "Tickers") %>% na.omit()
+
+gog_time_var_cor <- plotGOGARCH(xts_rtn)
+
+
+garch_plot <- 
+  ggplot(gog_time_var_cor %>% 
+           filter(grepl("EURUSD_PX_LAST_", Pairs),
+                  !grepl("_EURUSD_PX_LAST", Pairs))) +
+  geom_line(aes(x = date, y = Rho, colour = Pairs), size = 0.2) +
+        theme_hc() +
+        ggtitle("GARCH correlations to EURUSD") +
+        theme(legend.text=element_text(size=6), legend.title = element_blank())
+
+garch_plot
+
+```
+
+
+```{r USGG5YR_high_vs_low_vol_periods}
+
+Idxs <- PCA_AllData_with_date %>% 
+    gather(Tickers, Return, -date) %>% 
+    filter(!is.na(Return)) %>%
+    filter(Tickers !="EURUSD_PX_LAST") %>% 
+    mutate(YearMonth = format(date, "%Y%B"))
+
+
+# Consider only indexes with data from before 20080101, and use this as a common start date too...:
+# Can you argue why? - beacuase of GFC
+Idx_Cons <- Idxs %>% 
+    group_by(Tickers) %>% 
+    filter(date == first(date)) %>% 
+    ungroup() %>% 
+    filter(date < ymd(20080101)) %>%  
+    pull(Tickers) %>% unique # make a list of all the tickers that exist pre-GFC
+
+Idxs <- Idxs %>% 
+    filter(Tickers %in% Idx_Cons) %>%  # only keep tickers that existed pre-GFC
+    filter(date > ymd(20080101))
+
+# Winzorising: mitigate the effect of extreme values
+Idxs <- Idxs %>% 
+    group_by(Tickers) %>% 
+    mutate(Top = quantile(Return, 0.99), Bot = quantile(Return, 0.01)) %>% 
+    mutate(Return = ifelse(Return > Top, Top, ifelse(Return < Bot, Bot, Return))) %>% 
+    ungroup()
+
+# do periods of high and low volatility in the rand affect the performance of South African bank return prices
+
+EURUSDR_vol <- PCA_AllData_with_date %>% 
+    gather(Tickers, Return, -date) %>% 
+    filter(date > ymd(20080101)) %>% 
+    filter(Tickers == "EURUSD_PX_LAST")
+
+
+EURUSDRsd <- EURUSDR_vol %>% 
+    mutate(YearMonth = format(date, "%Y%B")) %>% 
+    group_by(YearMonth) %>% summarise(SD = sd(Return)*sqrt(52)) %>% 
+  # Top Decile Quantile overall (highly volatile month for spx:
+    mutate(TopQtile = quantile(SD, 0.8),
+           BotQtile = quantile(SD, 0.2))
+
+
+Hi_Vol <- EURUSDRsd %>% filter(SD > TopQtile) %>% pull(YearMonth)
+
+Low_Vol <- EURUSDRsd %>% filter(SD < BotQtile) %>% pull(YearMonth)
+
+perf_hi <- Perf_comparisons(Idxs, YMs = Hi_Vol, Alias = "High_Vol")
+
+perf_lo <- Perf_comparisons(Idxs, YMs = Low_Vol, Alias = "Low_Vol")
+```
+
+
+```{r spx_high, fig.cap = "Standard deviation and correlation ratio in periods of high Rand volatility \\label{high}"}
+kable(perf_hi, caption = "Standard deviation and correlation ratio in periods of high volatility \\label{high}")
+```
+
+
+```{r spx_low, fig.cap = "Standard deviation and correlation ratio in periods of low Rand volatility  \\label{low}"}
+kable(perf_lo, caption = "Standard deviation and correlation ratio in periods of low volatility \\label{low}")
+```
+
+
+
+<!-- ## SPXForecast GARCH -->
+
+<!-- ```{r spx_garch, echo=FALSE} -->
+
+
+<!-- demean = scale(PCA_AllData, center = TRUE, scale = TRUE) -->
+
+<!-- demean <-  demean[, colSums(is.na(demean)) < nrow(demean)] # remove col with only na -->
+
+<!-- date <- PCA_AllData_with_date[,1] -->
+
+<!-- demean <- cbind(date, demean) %>% gather(Tickers, Return, -date) %>% tibble::as_tibble()  -->
+
+<!-- xts_rtn <- demean %>% tbl2xts::tbl_xts(., cols_to_xts = "Return", spread_by = "Tickers") -->
+
+<!-- df <- demean %>% spread(Tickers, Return) -->
+<!-- # ------------------------ Step 0: split training and testing data -->
+<!-- train_size <- floor(0.8 * length(df)) -->
+<!-- train_returns <- df[1:train_size]  -->
+<!-- test_returns <- df[(train_size + 1):length(df)] -->
+
+<!-- # gog_time_var_cor <- plotGOGARCH(xts_rtn) -->
+
+<!-- xts_rtn <- train_returns %>% tbl2xts::tbl_xts()  -->
+
+<!--  # ------------------------ Step 1: Specficiations to be used: -->
+<!--     # Using the rugarch package, specify univariate functions -->
+
+<!--     # A) Univariate GARCH specifications: -->
+<!--     uspec <- ugarchspec( -->
+<!--         # variance.model = list(model = "gjrGARCH", -->
+<!--         variance.model = list(model = "gjrGARCH", -->
+<!--                               garchOrder = c(1, 1)), -->
+<!--         mean.model = list(armaOrder = c(1, -->
+<!--                                         0), include.mean = TRUE), -->
+<!--         distribution.model = "sstd") -->
+
+<!--     # B) Repeat uspec n times: -->
+<!--     multi_univ_garch_spec <- multispec(replicate(ncol(xts_rtn), uspec)) -->
+
+<!--     # ------------------------ Step 2: The specs are now saved. -->
+<!--     # Build our GO_GARCH model -->
+
+<!--     # From first step individual garch definitions (GJR): -->
+
+<!--     # Go-garch model specification: -->
+<!--     spec.go <- gogarchspec(multi_univ_garch_spec, -->
+<!--                            distribution.model = 'mvnorm', # or manig. -->
+<!--                            ica = 'fastica') # Note: we use the fastICA -->
+
+<!--     cl <- makePSOCKcluster(10) -->
+
+<!--     multf <- multifit(multi_univ_garch_spec, xts_rtn, cluster = cl) -->
+
+<!--     fit.gogarch <- gogarchfit(spec.go, -->
+<!--                               data = xts_rtn, -->
+<!--                               solver = 'hybrid', -->
+<!--                               cluster = cl, -->
+<!--                               gfun = 'tanh', -->
+<!--                               maxiter1 = 40000, -->
+<!--                               epsilon = 1e-08, -->
+<!--                               rseed = 100) -->
+
+<!--     # print(fit.gogarch) -->
+
+<!--     # ------------------------ Step 3: Extracttime-varying conditional correlations: -->
+<!--     gog.time.var.cor <- rcor(fit.gogarch) -->
+<!--     gog.time.var.cor <- aperm(gog.time.var.cor,c(3,2,1)) -->
+<!--     dim(gog.time.var.cor) <- c(nrow(gog.time.var.cor), ncol(gog.time.var.cor)^2) -->
+
+<!--     # ------------------------ Step 4: Rename to put G0-GAECH into a useable format -->
+<!--     gog.time.var.cor <- renamingdcc(ReturnSeries = xts_rtn, DCC.TV.Cor = gog.time.var.cor) -->
+
+<!--     # ------------------------ Step 5: Plot -->
+
+<!--     gog.time.var.cor -->
+
+
+<!--     # forecasts <- rugarch::ugarchforecast(fit.gogarch, n.ahead = length(test_returns)) -->
+
+<!--     # test_volatility <- sigma(forecasts) -->
+
+<!-- n_test <- floor(0.8 * length(df)) -->
+<!-- train_returns <- df[1:train_size]  -->
+<!-- test_returns <- df[(train_size + 1):length(df)] -->
+
+<!--   for (j in 1:n_test) { -->
+
+<!--   #####   Model Training    ##### -->
+<!--   if (j>1) { #Use warm starts when available -->
+<!--     setstart(spec.go) <- as.list(coef(vol_model)) -->
+<!--   } -->
+
+<!--     vol_model <- ugarchfit(spec.go, na.omit(asset_data$returns[trainSet[[j]]])) -->
+
+<!--     garch_spec_fix <- spec.go -->
+<!--     setfixed(garch_spec_fix) <- as.list(coef(vol_model)) -->
+
+<!--   for (i in 1:nRealVols) { -->
+<!--     var_predict <-  -->
+<!--       ugarchforecast(garch_spec_fix, -->
+<!--                      n.ahead = fwd_period[i], -->
+<!--                      n.roll = length(testSet[[j]])-1, -->
+<!--                      data = na.omit(asset_data$returns[filterSet]), -->
+<!--                      out.sample = length(testSet[[j]])) -->
+<!--     predicted[testSet[[j]],i] <- as.numeric(log(colMeans(sigma(var_predict)^2))) -->
+<!--   } -->
+
+<!-- } -->
+
+<!-- #Convert to dataframe -->
+<!-- colnames(predicted) <- colnames(RV[,-1]) -->
+<!-- predicted <- data.frame(datestamp=RV$datestamp,predicted) -->
+<!-- #Plot volatility predictions -->
+<!-- predicted %>%  -->
+<!--   pivot_longer(cols = !datestamp, names_to = "entity",values_to = "variance") %>%  -->
+<!--   mutate(variance=exp(variance)) %>%  -->
+<!--   ggplot(aes(x=datestamp,y=sqrt(252)*sqrt(variance), group=entity))+ -->
+<!--   geom_line(aes(color=entity)) -->
+
+<!-- #####   Performance measurement    ##### -->
+<!-- #Calculate VPE by matching lookback and look-ahead periods -->
+<!-- VPE_egarch <-  -->
+<!--   RV %>%  -->
+<!--   summarise(across(!datestamp,~vpeCalc(log(.x),predicted$.x))) -->
+
+<!-- VPE_egarch -->
+
+
+
+
+
+<!-- garch_plot <-  -->
+<!--   ggplot(gog_time_var_cor %>%  -->
+<!--            filter(grepl("VAR_SPX_PX_LAST_", Pairs), -->
+<!--                   !grepl("_VAR_SPX_PX_LAST", Pairs))) + -->
+<!--   geom_line(aes(x = date, y = Rho, colour = Pairs), size = 0.2) + -->
+<!--         theme_hc() + -->
+<!--         ggtitle("GARCH correlations to SP 500") + -->
+<!--         theme(legend.text=element_text(size=6), legend.title = element_blank()) -->
+
+
+
+
+
+<!-- ``` -->
 
 

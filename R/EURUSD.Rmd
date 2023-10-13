@@ -1,0 +1,1105 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+title: "On Realised Volatility"
+output: html_document
+---
+
+```{r setup packages, include=FALSE}
+# source("../config.R")
+pimR::tool()
+library(leaps)
+library(rugarch)
+library(gamsel)
+
+library(doParallel)
+n.cores <- parallel::detectCores() - 1
+cl <- makePSOCKcluster(n.cores)
+registerDoParallel(cl)
+```
+
+## Overview
+
+In this note we outline the steps one can take when modeling future realised volatility. We will cover equally weighted moving averages, GARCH models and a regression setup which can be estimated by a variety of machine learning algorithms.
+
+
+## Realised Variance
+
+Let us first define realised volatility, the quantity we seek to predict. Let
+
+$$ RV_{t|h} = h^{-1}\sum_{i=0}^{h-1} r_{t+i}^2 $$
+
+define the variance realised over the next $h$ days where 
+$$ r_t = \log(P_t)-\log(P_{t-1}) $$
+are the daily log returns calculated using daily closing prices $P_t$. We are primarily focused on the weekly, monthly, quarterly and semi-annual volatility horizon where 
+$$h\in \{5, 21, 63, 126\}$$
+respectively.
+
+We will use the S&P 500 data starting from 1995 for illustration.
+
+```{r get_data}
+tgt_entity <- "EURUSD Curncy"
+tgt_item <- "PX_LAST"
+tgt_source <- "BB" 
+start_date <- "1995-01-04"
+end_date <- Sys.Date()-1
+
+asset_data <-
+  pimR::fetch(
+    entity = tgt_entity,
+    item = tgt_item,
+    source = tgt_source,
+    start = start_date,
+    end = end_date,
+    minimal = FALSE
+  ) %>% 
+  arrange(datestamp) %>% 
+  mutate(returns=log(value)-log(lag(value))) %>%
+  dplyr::select(c(datestamp,entity,value,returns)) %>% 
+  tail(10*252) #only use the most recent 10 years so that the script runs faster
+
+#Plot data series
+asset_data %>% 
+  ggplot(aes(x=datestamp,y=value))+
+  geom_line()
+#Plot returns
+asset_data %>% 
+  drop_na() %>% 
+  ggplot(aes(x=datestamp,y=returns))+
+  geom_line()
+```
+
+Note that there are periods characterised by large dispersion interspersed with periods of low dispersions in returns. A good model should be able to reflect these changing patterns of volatility.
+
+When we calculate realised variance we must take care to use future returns relative to the starting point (i.e. returns between t and t+h).
+
+```{r realised_vol}
+fwd_period <- c(5,21,63,126)
+nRealVols <- length(fwd_period)
+nobs <- nrow(asset_data)
+RV <- matrix(NA,nobs,nRealVols)
+
+for (j in 1:nRealVols) {
+  RV[,j] <- roll_meanl(asset_data$returns^2,n = fwd_period[j])
+}
+colnames(RV) <- paste0("RV_",fwd_period)
+RV <- data.frame(datestamp=asset_data$datestamp,RV)
+
+#Plot realised volatility
+RV %>% 
+  # drop_na() %>% 
+  pivot_longer(cols = !datestamp, names_to = "entity",values_to = "variance") %>% 
+  ggplot(aes(x=datestamp,y=sqrt(252)*sqrt(variance), group=entity))+
+  geom_line(aes(color=entity))
+
+```
+
+## Show me your Volatility
+
+At PIM we currently don't model volatility explicitly. We implicitly estimate volatility using an equally weighted average of all past squared returns. Below we assume that we need 1000 returns to estimate the first volatility.
+
+```{r expanding_window_vol}
+if (anyNA(asset_data$returns)) {
+  variance_pim <- lag(c(NA,cummean(na.omit(asset_data$returns)^2)))
+}else{
+  variance_pim <- lag(cummean(na.omit(asset_data$returns)^2))
+}
+variance_pim[1:1001] <- NA
+variance_pim <- data.frame(datestamp=asset_data$datestamp,variance_pim=variance_pim)
+
+#Plot PIM volatility
+variance_pim %>% 
+  ggplot(aes(x=datestamp,y=sqrt(252)*sqrt(variance_pim)))+
+  geom_line()
+
+```
+Note that this volatility estimator is not as dynamic as the realised volatility. Let us compare it to the 1-month ahead volatility.
+
+```{r vol_comparison}
+variance_compare <- bind_cols(variance_pim,variance_21=RV$RV_21)
+
+#Plot vols
+variance_compare %>% 
+  pivot_longer(cols = !datestamp, names_to = "entity",values_to = "variance") %>% 
+  ggplot(aes(x=datestamp,y=sqrt(252)*sqrt(variance), group=entity))+
+  geom_line(aes(color=entity))
+```
+
+We see that there are periods where we are overestimating realised volatility and when we are underestimating it. We can quantify the accuracy of our estimator with an out-of-sample (OOS) r-squared or variance proportion explained (VPE) as
+$$ VPE = 1- \frac{\sf mean(|\log(RV_{t|h})-log(\hat{\sigma}_{t}^2)|)}{\sf mean(|\log(RV_{t|h})- \sf mean(\log(RV_{t|h}))|)} $$
+where $\hat{\sigma}_{t}^2$ is our predicted variance.
+
+```{r vpe_calc}
+
+vpeCalc <- function(RV,predicted) {
+  VPE <- 1-mean(abs(RV-predicted), na.rm = TRUE)/mean(abs(RV-mean(RV, na.rm = TRUE)) ,na.rm = TRUE)
+  return(VPE)
+}
+
+#####   Performance measurement    #####
+#Calculate VPE by matching lookback and look-ahead periods
+VPE_pim <- 
+  RV %>% 
+  summarise(across(!datestamp,~vpeCalc(log(.x),log(variance_pim$variance_pim))))
+
+VPE_pim
+```
+In this illustration we see that the VPE from our so-called PIM approach is basically zero.
+
+## Equally Weighted Averages
+
+Equal weighting of historical data was the first statistical method for forecasting volatility and correlation of financial asset returns to be widely accepted. For many years it was the market standard to forecast average volatility over the next h days by taking an equally weighted average of squared returns over the previous k days. Here k is the estimation sample (data window/lookback period) used to estimate the variance. 
+
+Here we consider equally weighted moving averages (WMA) using the past day, week, month, quarter, half-year and year of squared return data where $k \in \{1, 5, 21, 63, 126, 189, 252 \}$ . Our EWA estimators using $k$ past returns are evaluated as
+$$\hat{\sigma}_{t|-k}^2=k^{-1}\sum_{i=1}^k r_{t-i}^2.$$
+Please note that estimation is based on past returns whereas realised volatility is calculated on future returns.
+
+```{r WMA}
+lookback_period <- c(1,5,21,3*(1:4)*21)
+nWMA <- length(lookback_period)
+variance_wma <- matrix(NA,nobs,nWMA)
+
+for (j in 1:nWMA) {
+  variance_wma[,j] <- roll_meanr(lag(asset_data$returns)^2,n = lookback_period[j])
+}
+colnames(variance_wma) <- paste0("variance_",lookback_period)
+variance_wma <- data.frame(datestamp=asset_data$datestamp,variance_wma)
+
+#Plot EWA volatility
+variance_wma %>% 
+  pivot_longer(cols = !datestamp, names_to = "entity",values_to = "variance") %>% 
+  ggplot(aes(x=datestamp,y=sqrt(252)*sqrt(variance), group=entity))+
+  geom_line(aes(color=entity))
+
+```
+
+The WMA volatilities display the volatility clustering and mean reversion properties that we need. The problem is which lookback period $k$ is best suited for predicting volatility for forward horizon $h$.
+
+A popular approach is to assume that $k=h$ will do the trick. Below we calculate the VPEs when following this approach.
+
+```{r wma_model}
+#Identify columns where lookback and look-ahead periods match
+RV_predictors <- matrix(match(fwd_period,lookback_period),1,nRealVols) %>% as.data.frame()
+colnames(RV_predictors) <- colnames(RV %>% select(-datestamp))
+
+#Calculate VPE by matching lookback and look-ahead periods
+VPE_wma <- 
+  RV %>% 
+  summarise(across(!datestamp,~vpeCalc(log(.x),log(variance_wma[[RV_predictors$.x+1]]))))
+
+VPE_wma
+```
+
+Warning: the equally weighted approach has a number of limitations and pitfalls. We recommend that these models only be used as an indication of the possible range for the long-term volatility. 
+
+Imagine if just one extreme squared return is included in the averaging period k then the volatility forecast will be very high. But then it will suddenly jump downward to a much lower level on a day when absolutely nothing happened in the markets. It just happened to be the day t+k when the extreme return dropped out of the moving estimation sample. And all the time that this extreme return stays within the data window the volatility forecast remains high. 
+
+
+## Exponentially Weighted Averages
+
+An exponentially weighted moving average (EWMA) puts more weight on the more recent observations. That is, as extreme returns move further into the past when the data window moves, they become less important in the average. For this reason EWMA forecasts do not suffer from the ‘ghost features’ that we find in equally weighted moving averages. 
+
+The EWMA estimate of variance is 
+$$\hat{\sigma}_{t,\lambda}^2=(1-\lambda)r^2_{t-1}+\lambda \hat{\sigma}_{t-1,\lambda}^2.$$ 
+We can estimate $\lambda$ and $\sigma^2_0$ via maximum likelihood estimation (MLE) where we maximimise 
+$$\log L(\lambda,\sigma^2_0)=-\frac{1}{2}\sum_{t=1}^{T} (\log \sigma^2_t+ \frac{r_{t}^2}{\sigma^2_t}) $$
+where $\lambda \in (0,1)$ and $\sigma^2_0>0$. 
+
+This is effectively a restricted integrated GARCH (iGARCH) model, with the restriction that the intercept ($\omega$) is equal to zero, with the smoothing parameter ($\lambda$) equivalent to the autoregressive parameter ($\beta$) in the GARCH equation. More on GARCH to follow.
+
+```{r ewma_model, message = FALSE, warning = FALSE}
+#Set up estimation and testing parameters
+nobs <- nrow(asset_data)
+min_train <- 1000 #number of observations in 1st training set
+min_test <- 3*21 #we then test on these observations after the training set
+n_test <- ceiling((nobs-min_train)/min_test) #giving us this total number of test blocks
+tune_freq <- 4 #Re-tune the model every tune_freq test periods
+predicted <- rep(NA,nobs) #store predictions
+
+#Create training and testing samples.
+trainSet <- list()
+testSet <- list()
+for (j in 0:(n_test-1)) {
+  #a growing training window
+  idx_train <- 1:(min_train+j*min_test)
+  #ensure no overlap in the training and testing indices
+  idx_test <- (min_train+j*min_test+1):min(min_train+(j+1)*min_test,nobs)
+  trainSet[[j+1]] <- idx_train
+  testSet[[j+1]] <- idx_test
+}
+
+##### Model fitting and predicting #####
+
+#####   Specify EWMA as a restricted integrated GARCH model    #####
+ewma_spec  <- 
+  ugarchspec(mean.model=list(armaOrder=c(0,0), include.mean=FALSE),
+             variance.model=list(model="iGARCH"), fixed.pars=list(omega=0))
+for (j in 1:n_test) {
+  #####   Model Training    #####
+  vol_model <- ugarchfit(ewma_spec, na.omit(asset_data$returns[trainSet[[j]]]))
+  
+  #####   Prediction    #####
+  filterSet <- c(trainSet[[j]],head(testSet[[j]],n=-1)) #note that we don't use the latest return
+  #fix the learned model parameters
+  ewma_spec_fix <- ewma_spec
+  setfixed(ewma_spec_fix) <- as.list(coef(vol_model))
+  var_predict <- 
+    ugarchforecast(ewma_spec_fix,
+                   n.ahead = 1,
+                   n.roll = length(testSet[[j]])-1,
+                   data = na.omit(asset_data$returns[filterSet]),
+                   out.sample = length(testSet[[j]]))
+  predicted[testSet[[j]]] <- as.numeric(log(sigma(var_predict)^2))
+  
+}
+
+#####   Performance measurement    #####
+#Calculate VPE by matching lookback and look-ahead periods
+VPE_ewma <- 
+  RV %>% 
+  summarise(across(!datestamp,~vpeCalc(log(.x),predicted)))
+
+VPE_ewma
+```
+
+In our illustration we note that the EWMA model does a bit better than our WMA approach.
+
+## Symmetric GARCH
+
+The two moving average models described above assume that returns are IID. But we know that the IID assumption is very unrealistic. The volatility of financial asset returns changes over time, with periods when volatility is exceptionally high interspersed with periods when volatility is unusually low. 
+
+Volatility clustering has important implications for risk measurement and for pricing and hedging options. Following a large shock to the market, volatility changes and the probability of another large shock is greatly increased. Portfolio risk measurement and option prices both need to take this into account. Unfortunately, the moving average models that we have considered above, though simple, provide only a crude picture of the time variation in volatility. This is because the models assume volatility is constant and the only reason why estimates change over time is because of variations in the estimation sample data. GARCH models of volatility are specifically designed to capture the volatility clustering of returns.
+
+Here will consider the symmetric GARCH model and one example of an asymmetric GARCH model. The symmetric GARCH model assumes the response of the variance to negative market shocks is the same as its response to positive market shocks of the same magnitude. But then there is no possibility of a leverage effect where volatility increases more following a negative shock than following a positive shock of the same magnitude. The leverage effect is pronounced in equity markets, where there is usually a strong negative correlation between the equity returns and the change in volatility. The opposite asymmetry, where volatility increases more following a price rise than it does following an equivalent price fall, commonly occurs in commodity markets or when modelling yields.
+
+The symmetric GARCH model assumes the following dynamic behaviour
+$$\sigma^2_t=\omega+\alpha r^2_{t-1}+\beta \sigma^2_{t-1}.$$
+The model parameters are also estimated via MLE. GARCH models are able to generate diffrent forecasts for different time horizons.
+
+```{r sgarch_model}
+#Set up estimation and testing parameters
+#we use the same as above
+
+#Create training and testing samples.
+#we use the same as above
+predicted <- matrix(NA,nobs,nRealVols)
+
+#####   Symmetric GARCH Specification    #####
+garch_spec  <- 
+  ugarchspec(mean.model=list(armaOrder=c(0,0), include.mean=TRUE),
+             variance.model=list(model = 'sGARCH', garchOrder = c(1, 1)))
+
+for (j in 1:n_test) {
+  
+  #####   Model Training    #####
+  if (j>1) { #Use warm starts when available
+    setstart(garch_spec) <- as.list(coef(vol_model))
+  }
+  vol_model <- ugarchfit(garch_spec, na.omit(asset_data$returns[trainSet[[j]]]))
+  
+  #####   Prediction    #####
+  filterSet <- c(trainSet[[j]],head(testSet[[j]],n=-1)) #note that we don't use the latest return
+  garch_spec_fix <- garch_spec
+  setfixed(garch_spec_fix) <- as.list(coef(vol_model))
+  
+  for (i in 1:nRealVols) {
+    var_predict <- 
+      ugarchforecast(garch_spec_fix,
+                     n.ahead = fwd_period[i],
+                     n.roll = length(testSet[[j]])-1,
+                     data = na.omit(asset_data$returns[filterSet]),
+                     out.sample = length(testSet[[j]]))
+    predicted[testSet[[j]],i] <- as.numeric(log(colMeans(sigma(var_predict)^2)))
+  }
+  
+}
+
+#Convert to dataframe
+colnames(predicted) <- colnames(RV[,-1])
+predicted <- data.frame(datestamp=RV$datestamp,predicted)
+#Plot volatility predictions
+predicted %>% 
+  pivot_longer(cols = !datestamp, names_to = "entity",values_to = "variance") %>% 
+  mutate(variance=exp(variance)) %>% 
+  ggplot(aes(x=datestamp,y=sqrt(252)*sqrt(variance), group=entity))+
+  geom_line(aes(color=entity))
+
+#####   Performance measurement    #####
+#Calculate VPE by matching lookback and look-ahead periods
+VPE_sgarch <- 
+  RV %>% 
+  summarise(across(!datestamp,~vpeCalc(log(.x),predicted$.x)))
+
+VPE_sgarch
+```
+For this example we see a similar pattern in VPEs.
+
+## Exponential GARCH
+
+The exponential GARCH (E-GARCH) model can accommodate asymmetric variance innovations to negative returns compared to positive ones.
+
+It is very easy to adapt the code above to model under any other GARCH specification by simply changing the spec model from sGARCH to eGARCH as seen below.
+
+```{r egarch_model}
+#Set up estimation and testing parameters
+#we use the same as above
+
+#Create training and testing samples.
+#we use the same as above
+predicted <- matrix(NA,nobs,nRealVols)
+
+#####   Symmetric GARCH Specification    #####
+garch_spec  <- 
+  ugarchspec(mean.model=list(armaOrder=c(0,0), include.mean=TRUE),
+             variance.model=list(model = 'eGARCH', garchOrder = c(1, 1)))
+
+for (j in 1:n_test) {
+  
+  #####   Model Training    #####
+  if (j>1) { #Use warm starts when available
+    setstart(garch_spec) <- as.list(coef(vol_model))
+  }
+  vol_model <- ugarchfit(garch_spec, na.omit(asset_data$returns[trainSet[[j]]]))
+  
+  #####   Prediction    #####
+  filterSet <- c(trainSet[[j]],head(testSet[[j]],n=-1)) #note that we don't use the latest return
+  garch_spec_fix <- garch_spec
+  setfixed(garch_spec_fix) <- as.list(coef(vol_model))
+  
+  for (i in 1:nRealVols) {
+    var_predict <- 
+      ugarchforecast(garch_spec_fix,
+                     n.ahead = fwd_period[i],
+                     n.roll = length(testSet[[j]])-1,
+                     data = na.omit(asset_data$returns[filterSet]),
+                     out.sample = length(testSet[[j]]))
+    predicted[testSet[[j]],i] <- as.numeric(log(colMeans(sigma(var_predict)^2)))
+  }
+  
+}
+
+#Convert to dataframe
+colnames(predicted) <- colnames(RV[,-1])
+predicted <- data.frame(datestamp=RV$datestamp,predicted)
+#Plot volatility predictions
+predicted %>% 
+  pivot_longer(cols = !datestamp, names_to = "entity",values_to = "variance") %>% 
+  mutate(variance=exp(variance)) %>% 
+  ggplot(aes(x=datestamp,y=sqrt(252)*sqrt(variance), group=entity))+
+  geom_line(aes(color=entity))
+
+#####   Performance measurement    #####
+#Calculate VPE by matching lookback and look-ahead periods
+VPE_egarch <- 
+  RV %>% 
+  summarise(across(!datestamp,~vpeCalc(log(.x),predicted$.x)))
+
+VPE_egarch
+```
+In this example we note that adding an asymmetric feature allowed us to improve VPE on all prediction horizons.
+
+## A Regression Approach
+
+We note that the volatility models share a common specification which can be characterised as
+$$\sigma^2_t= Bias+\sigma^2_{t-1,\sf ST}+\sigma^2_{t-1,\sf LT}.$$
+
+The impact of recent market moves on volatility is captured by $\sigma^2_{t-1,\sf ST}$ and the longer-term level that volatility tends to revert back to is reflected by $\sigma^2_{t-1,\sf LT}$. The bias term is to make sure that we have an unbiased estimator of $RV_{t|h}$. Thus, we can formulate a regression problem along these guidelines where our dependent variable $Y=RV_{t|h}$ or $Y=\log RV_{t|h}$.
+
+A supervised statistical learning algorithm can set up as a function approximation problem aimed to find a function $f$ such that 
+$$RV_{t|h} = \alpha + \hat{f}(\mathbf{x}) + \varepsilon$$
+where entries in $\mathbf{x} = \langle x_1, x_1, \dots, x_p\rangle$ are our features.
+
+### Ridge Regression
+
+If we assume that $\hat{f}$ is a linear function of our predictors then our regression problem can be specified as
+$$RV_{t|h} = \alpha + \sum_{i=1}^{p}\beta_jx_j + \varepsilon.$$
+
+We can estimate the model parameters via ridge regression. This algorithm is robust when our features are highly correlated with one another.
+
+Ridge regression is very similar to least squares, except that the coefficients are estimated by minimising the penalised residual sum of squares (RSS). In particular, the ridge regression coefficient estimates $\beta$ are the values that minimise
+$$\sum_{t=1}^{n}\left(RV_{t|h} - \alpha - \sum_{j=1}^{p} \beta_j x_{tj}\right)^2+\lambda \sum_{j=1}^{p} \beta_j^2$$
+where $\lambda \geq 0$ is a hyper/tuning parameter to be determined by cross-validation (CV).
+
+For example, if our features are the WMA variances for all $k$ and for each $h$ we can proceed as follows.
+
+```{r ridge_model}
+startTime <- Sys.time()
+#Set up estimation and testing parameters
+#we use the same as above
+
+#Create training and testing samples.
+trainSet <- list()
+testSet <- list()
+for (j in 0:(n_test-1)) {
+  #a growing training window
+  idx_train <- 1:(min_train+j*min_test)
+  idx_train <- head(idx_train,n=-max(fwd_period)) #Purge the training set
+  #ensure no overlap in the training and testing indices
+  idx_test <- (min_train+j*min_test+1):min(min_train+(j+1)*min_test,nobs)
+  trainSet[[j+1]] <- idx_train
+  testSet[[j+1]] <- idx_test
+}
+
+#The elastic net penalty is controlled by alpha, and bridges the gap between lasso regression (alpha=1 the default) and ridge regression (alpha=0)
+alpha <- 0
+nFolds_validate <- 10 #re-sampling splits on the training set
+predicted <- matrix(NA,nobs,nRealVols)
+
+x <- variance_wma %>% select(-datestamp) %>% as.matrix()
+for (i in 1:nRealVols) {
+  data_all <- 
+      data.frame(y=log(RV[[i+1]]), log(pmax(x,1e-8)))
+  
+  for (j in 1:n_test) {
+    #####   Validation data splitting    #####
+    #Avoid the first column of RV as it contains dates
+    data <- 
+      data_all %>% 
+      slice(trainSet[[j]]) %>% 
+      drop_na()
+    foldID <- ntile(1:nrow(data),nFolds_validate)
+    #####   Model Training    #####
+    vol_model <- 
+      cv.glmnet(
+          x = data %>% select(-y) %>% as.matrix(),
+          y = data$y,
+          type.measure = "mae",
+          foldid = foldID,
+          alpha = alpha
+        )
+    #####   Prediction    #####
+    predicted[testSet[[j]],i] <- 
+      predict(vol_model,
+              newx=log(pmax(x[testSet[[j]],],1e-8)),
+              s="lambda.min")
+  }
+  
+}
+
+endTime <- Sys.time()
+print(endTime - startTime)
+
+#Convert to dataframe
+colnames(predicted) <- colnames(RV[,-1])
+predicted <- data.frame(datestamp=RV$datestamp,predicted)
+#Plot volatility predictions
+predicted %>% 
+  pivot_longer(cols = !datestamp, names_to = "entity",values_to = "variance") %>% 
+  mutate(variance=exp(variance)) %>% 
+  ggplot(aes(x=datestamp,y=sqrt(252)*sqrt(variance), group=entity))+
+  geom_line(aes(color=entity))
+
+#####   Performance measurement    #####
+#Calculate VPE by matching lookback and look-ahead periods
+VPE_ridge <- 
+  RV %>% 
+  summarise(across(!datestamp,~vpeCalc(log(.x),predicted$.x)))
+
+VPE_ridge
+```
+
+### Generalised Additive Model
+
+Generalized additive models (GAMs) provide a general framework for extending a standard linear model by allowing non-linear functions of each of the variables, while maintaining additivity. So GAMs extend the multiple linear regression model
+$$RV_{t|h} = \alpha + \sum_{i=1}^{p}\beta_jx_j + \varepsilon$$
+in order to allow for non-linear relationships between each feature and the response is to replace each linear component $\beta_jx_j$ with a (smooth) non-linear function $f_j(x_j)$. The model is written as
+$$RV_{t|h} = \alpha + \sum_{i=1}^{p}f_j(x_j) + \varepsilon$$
+
+Here we use the gamsel package to fit our GAM. gamsel selects whether a term in a GAM is nonzero, linear, or a non-linear spline.  It fits the entire regularization path on a grid of values for the overall penalty lambda similar to the ridge setting.
+
+```{r gam_model}
+startTime <- Sys.time()
+#Set up estimation and testing parameters
+#we use the same as above
+
+#Create training and testing samples.
+#we use the same as above
+
+nFolds_validate <- 10 #re-sampling splits on the training set
+predicted <- matrix(NA,nobs,nRealVols)
+
+x <- variance_wma %>% select(-datestamp) %>% as.matrix()
+for (i in 1:nRealVols) {
+  data_all <- 
+      data.frame(y=log(RV[[i+1]]), log(pmax(x,1e-8)))
+  
+  for (j in 1:n_test) {
+    #Avoid the first column of RV as it contains dates
+    data <- 
+      data_all %>% 
+      slice(trainSet[[j]]) %>% 
+      drop_na()
+  
+    #####   Validation data splitting    #####
+    foldID <- ntile(1:nrow(data),nFolds_validate)
+    #####   Model Tuning    #####
+    vol_model <- 
+      cv.gamsel(
+          x = data %>% select(-y) %>% as.matrix(),
+          y = data$y,
+          type.measure = "mae",
+          dfs = rep(2, ncol(data)-1),
+          foldid = foldID,
+          parallel = TRUE
+        )
+    
+    #####   Prediction    #####
+    optim_index <- which.min(vol_model$cvm)
+    #Fit final model on all training data
+    vol_model <- 
+      gamsel(
+          x = data %>% select(-y) %>% as.matrix(),
+          y = data$y,
+          dfs = rep(2, ncol(data)-1),
+          lambda = vol_model$lambda[optim_index]
+        )
+    
+    predicted[testSet[[j]],i] <-
+      predict(vol_model,
+              newdata=log(pmax(x[testSet[[j]],],1e-8)),
+              index=1
+              )
+  }
+  # print(c(i,nRealVols))
+}
+
+endTime <- Sys.time()
+print(endTime - startTime)
+
+#Convert to dataframe
+colnames(predicted) <- colnames(RV[,-1])
+predicted <- data.frame(datestamp=RV$datestamp,predicted)
+#Plot volatility predictions
+predicted %>% 
+  pivot_longer(cols = !datestamp, names_to = "entity",values_to = "variance") %>% 
+  mutate(variance=exp(variance)) %>% 
+  ggplot(aes(x=datestamp,y=sqrt(252)*sqrt(variance), group=entity))+
+  geom_line(aes(color=entity))
+
+#####   Performance measurement    #####
+#Calculate VPE by matching lookback and look-ahead periods
+VPE_gam <- 
+  RV %>% 
+  summarise(across(!datestamp,~vpeCalc(log(.x),predicted$.x)))
+
+VPE_gam
+```
+
+
+### Random Forests
+
+In this section we implement a tree-based methods for regression. This involves stratifying or segmenting the predictor space into a number of simple regions. In order to make a prediction for a given observation, we typically use the mean response value for the training observations in the region to which it belongs. Random forests (RFs) involves producing multiple trees which are then combined to yield a single consensus prediction. Combining a large number of trees can often result in dramatic improvements in prediction accuracy.
+
+
+```{r rf_model}
+startTime <- Sys.time()
+#Set up estimation and testing parameters
+#we use the same as above
+
+#Create training and testing samples.
+#we use the same as above
+
+tune_freq <- 4 #Re-tune the model every tune_freq test periods
+
+nFolds_validate <- 10 #re-sampling splits on the training set
+predicted <- matrix(NA,nobs,nRealVols)
+
+x <- variance_wma %>% select(-datestamp) %>% as.matrix()
+for (i in 1:nRealVols) {
+  data_all <- 
+      data.frame(y=log(RV[[i+1]]), log(pmax(x,1e-8)))
+  
+  for (j in 1:n_test) {
+    
+    #####   Validation data splitting    #####
+    #Avoid the first column of RV as it contains dates
+    data <- 
+      data_all %>% 
+      slice(trainSet[[j]]) %>% 
+      drop_na()
+    
+    fold_groups <- ntile(1:nrow(data),nFolds_validate)
+    #Turn folds to list
+    valid_trainSet <- list()
+    valid_testSet <- list()
+    for (k in 1:nFolds_validate) {
+      #Use a random subset for validation to speed up computation.
+      # validate_draw <- sample(which(fold_groups!=k),max(min_draws,round(resampleFraction*nrow(data))),replace = FALSE)
+      valid_trainSet[[k]] <- which(fold_groups!=k)
+      valid_testSet[[k]] <- which(fold_groups==k)
+    }
+    ctrl <- 
+      trainControl(
+        index = valid_trainSet,indexOut = valid_testSet
+      )
+    
+    #####   Model Tuning    #####
+    # tuneGrid <- expand.grid(sigma=(1:10)/40,C=(1:4)/2)
+    tuneGrid <- expand.grid(min.node.size=2*(1:20),
+                            mtry=1,
+                            splitrule="variance")
+    if ((j-1)%%tune_freq == 0) {
+      vol_model <- 
+        train(y~.,
+              data = data,
+              method = 'ranger',
+              metric="MAE",
+              tuneGrid = tuneGrid,
+              trControl = ctrl)
+      optim_pars <- vol_model$bestTune
+    }else{
+      vol_model <- 
+        train(y~.,
+              data = data,
+              method = 'ranger',
+              metric="MAE",
+              tuneGrid = optim_pars,
+              trControl = trainControl(method = "none"))
+    }
+    
+    #####   Prediction    #####
+    predicted[testSet[[j]],i] <- 
+      predict(vol_model,
+              newdata=log(pmax(x[testSet[[j]],],1e-8))
+              )
+    
+  }
+  print(c(i,nRealVols))
+}
+
+endTime <- Sys.time()
+print(endTime - startTime)
+
+#Convert to dataframe
+colnames(predicted) <- colnames(RV[,-1])
+predicted <- data.frame(datestamp=RV$datestamp,predicted)
+#Plot volatility predictions
+predicted %>% 
+  pivot_longer(cols = !datestamp, names_to = "entity",values_to = "variance") %>% 
+  mutate(variance=exp(variance)) %>% 
+  ggplot(aes(x=datestamp,y=sqrt(252)*sqrt(variance), group=entity))+
+  geom_line(aes(color=entity))
+
+#####   Performance measurement    #####
+#Calculate VPE by matching lookback and look-ahead periods
+VPE_rf <- 
+  RV %>% 
+  summarise(across(!datestamp,~vpeCalc(log(.x),predicted$.x)))
+
+VPE_rf
+```
+
+### Support Vector Machine
+
+Support vector machines (SVMs) tackle the regression problem by transforming the set of predictors into a higher dimensional space via the so-called kernel trick. In the higher dimensional plane y is characterised using a linear model.
+
+```{r svm_model}
+startTime <- Sys.time()
+#Set up estimation and testing parameters
+#we use the same as above
+
+#Create training and testing samples.
+#we use the same as above
+
+nFolds_validate <- 10 #re-sampling splits on the training set
+predicted <- matrix(NA,nobs,nRealVols)
+
+x <- variance_wma %>% select(-datestamp) %>% as.matrix()
+for (i in 1:nRealVols) {
+  data_all <- 
+      data.frame(y=log(RV[[i+1]]), log(pmax(x,1e-8)))
+  
+  for (j in 1:n_test) {
+    
+    #####   Validation data splitting    #####
+    #Avoid the first column of RV as it contains dates
+    data <- 
+      data_all %>% 
+      slice(trainSet[[j]]) %>% 
+      drop_na()
+    
+    fold_groups <- ntile(1:nrow(data),nFolds_validate)
+    #Turn folds to list
+    valid_trainSet <- list()
+    valid_testSet <- list()
+    for (k in 1:nFolds_validate) {
+      #We could use a smaller random subset for validation to speed up computation.
+      valid_trainSet[[k]] <- which(fold_groups!=k)
+      valid_testSet[[k]] <- which(fold_groups==k)
+    }
+    ctrl <- 
+      trainControl(
+        index = valid_trainSet,indexOut = valid_testSet
+      )
+    
+    #####   Model Tuning    #####
+    # tuneGrid <- expand.grid(sigma=(1:10)/40,C=(1:4)/2)
+    # tuneGrid <- expand.grid(sigma=c(0.05,0.1,0.2,0.4,0.6),C=c(0.25,0.5,1,1.5,2))
+    tuneGrid <- expand.grid(C=exp(seq(-10,0,length.out=50)))
+    if ((j-1)%%tune_freq == 0) {
+      vol_model <- 
+        train(y~.,
+              data = data,
+              method = 'svmLinear',
+              preProcess=c("center", "scale"),
+              tuneGrid = tuneGrid,
+              trControl = ctrl)
+      optim_pars <- vol_model$bestTune
+    }else{
+      vol_model <- 
+        train(y~.,
+              data = data,
+              method = 'svmLinear',
+              preProcess=c("center", "scale"),
+              tuneGrid = optim_pars,
+              trControl = trainControl(method = "none"))
+    }
+    
+    #####   Prediction    #####
+    predicted[testSet[[j]],i] <- 
+      predict(vol_model,
+              newdata=log(pmax(x[testSet[[j]],],1e-8))
+              )
+    
+  }
+  
+}
+
+endTime <- Sys.time()
+print(endTime - startTime)
+
+#Convert to dataframe
+colnames(predicted) <- colnames(RV[,-1])
+predicted <- data.frame(datestamp=RV$datestamp,predicted)
+#Plot volatility predictions
+predicted %>% 
+  pivot_longer(cols = !datestamp, names_to = "entity",values_to = "variance") %>% 
+  mutate(variance=exp(variance)) %>% 
+  ggplot(aes(x=datestamp,y=sqrt(252)*sqrt(variance), group=entity))+
+  geom_line(aes(color=entity))
+
+#####   Performance measurement    #####
+#Calculate VPE by matching lookback and look-ahead periods
+VPE_svm <- 
+  RV %>% 
+  summarise(across(!datestamp,~vpeCalc(log(.x),predicted$.x)))
+
+VPE_svm
+```
+
+
+
+
+### Copula
+
+```{r}
+# Load data
+library(copula)
+
+pacman::p_load(fGarch)
+
+# Fit GARCH model
+
+garch_model <- garchFit(~garch(1,1), data = spx)
+
+ 
+
+# Extract standardized residuals
+
+std_resid <- residuals(garch_model, standardize = TRUE)
+
+ 
+
+# Fit copula to standardized residuals
+
+copula_fit <- fitCopula(cbind(pnorm(std_resid[,1]), pnorm(std_resid[,2])), family = "t")
+
+ 
+
+# Simulate new standardized residuals from copula
+
+sim_resid <- rCopula(nrow(data), copula_fit)
+
+ 
+
+# Transform simulated residuals back to original scale
+
+sim_resid <- qnorm(sim_resid)
+
+sim_resid[,1] <- sim_resid[,1] * garch_model@sigma.t[,1]
+
+sim_resid[,2] <- sim_resid[,2] * garch_model@sigma.t[,2]
+
+ 
+
+# Compute volatility forecast
+
+forecast <- predict(garch_model, n.ahead = 1, newseries = sim_resid)
+
+
+
+
+library(MASS)
+
+# set.seed(100)
+# m <- 3
+# n <- 2000
+# sigma <- matrix(c(1, 0.4, 0.2,
+#                   0.4, 1, -0.8,
+#                   0.2, -0.8, 1), 
+#                 nrow=3)
+# z <- mvrnorm(n,mu=rep(0, m),Sigma=sigma,empirical=T)
+
+z <- spx %>% tbl_xts() 
+
+library(psych)
+cor(z,method='spearman')
+pairs.panels(z)
+
+u <- pnorm(z)
+pairs.panels(u)
+
+
+library(rgl)
+pacman::p_load(rgl)
+plot3d(u[,1],u[,2],u[,3],pch=20,col='navyblue')
+
+x1 <- qgamma(u[,1],shape=2,scale=1)
+x2 <- qbeta(u[,2],2,2)
+x3 <- qt(u[,3],df=5)
+plot3d(x1,x2,x3,pch=20,col='blue')
+plot(x1,x2)
+plot(x2,x3)
+
+
+df <- cbind(x1,x2,x3)
+pairs.panels(df)
+cor(df, meth='spearman')
+
+
+pacman::p_load(copula)
+set.seed(100)
+myCop <- normalCopula(param=c(0.4,0.2,-0.8), dim = 3, dispstr = "un")
+myMvd <- mvdc(copula=myCop, margins=c("gamma", "beta", "t"),
+              paramMargins=list(list(shape=2, scale=1),
+                                list(shape1=2, shape2=2), 
+                                list(df=5)) )
+
+
+rmvdc.new <- function (mvdc, n) 
+{
+    dim <- mvdc@copula@dimension
+    u <- rCopula(mvdc@copula, n)
+    x <- u
+    for (i in 1:dim) {
+        if (mvdc@margins[i]=="Johnson") {
+		qdf.expr <- copula:::asCall(copula:::P0("q", mvdc@margins[i]), list(mvdc@paramMargins[[i]])) } else {
+		qdf.expr <- copula:::asCall(copula:::P0("q", mvdc@margins[i]), mvdc@paramMargins[[i]])}
+		x[, i] <- eval(qdf.expr, list(x = u[, i]))
+    }
+    x
+}
+
+
+
+Z2 <- rMvdc(myMvd, 2000)
+colnames(Z2) <- c("x1", "x2", "x3")
+pairs.panels(Z2)
+
+```
+
+
+```{r}
+##' do the margin functions "p<nam>", "d<nam>" exist?
+mvd.has.marF <- function(margins, prefix = "p")
+    vapply(margins, function(M)
+	   existsFunction(paste0(prefix, M)), NA)
+
+mvdCheckM <- function(margins, prefix = "p") {
+    ex <- mvd.has.marF(margins, prefix)
+    if(any(!ex))
+	warning("margins correct? Currently, have no function(s) named: ",
+		paste(vapply(unique(margins[!ex]), function(M)
+			     paste0(prefix, M), ""), collapse=", "))
+}
+
+mvdc <- function(copula, margins, paramMargins, marginsIdentical = FALSE,
+		 check = TRUE, fixupNames = TRUE)
+{
+    if (marginsIdentical) {
+        dim <- dim(copula)
+	if(length(margins) == 1)
+	    margins <- rep(margins, dim)
+	if(length(paramMargins) == 1)
+	    paramMargins <- rep(paramMargins, dim)
+    }
+    if(check) {
+	mvdCheckM(margins, "p")
+	mvdCheckM(margins, "d")
+    }
+    if(fixupNames && all(mvd.has.marF(margins, "p"))) {
+	for(i in seq_along(margins)) {
+	    n.i <- names(p.i <- paramMargins[[i]])
+	    if(is.null(n.i) || any(!nzchar(n.i))) { # get names of formal args
+		nnms <- names(formals(get(paste0("p",margins[[i]])))[-1])
+		## but not the typical "non-parameter" arguments:
+		nnms <- nnms[is.na(match(nnms, c("lower.tail", "log.p")))]
+		if(length(nnms) > length(p.i)) length(nnms) <- length(p.i)
+		if(length(nnms) > 0 &&
+		   (is.null(n.i) || length(nnms) == length(n.i))) # careful ..
+		   names(paramMargins[[i]]) <- nnms
+	    }
+	}
+    }
+    new("mvdc", copula = copula, margins = margins, paramMargins = paramMargins,
+	marginsIdentical = marginsIdentical)
+}
+
+## "dim": via "xcopula" method
+
+##' @title Parameter names of the margins of an "mvdc" object
+##' @param mv
+##' @return character vector of "the correct" length
+##' @author Martin Maechler
+margpnames <- function(mv) {
+    nMar <- lengths(mv@paramMargins) # or vapply(mv@paramMargins, nFree, 1L)
+    p <- dim(mv@copula)
+    pnms <- unlist(lapply(mv@paramMargins, names)) # maybe NULL
+    if (sum(nMar) == 0) character()
+    else if(mv@marginsIdentical) ## all the same ==> names only of *first* margin
+	paste(paste("m", pnms[seq_len(nMar[1])], sep="."))
+    else
+	paste(paste0("m", rep.int(1:p, nMar)), pnms, sep=".")
+}
+
+## Function asCall was kindly supplied by
+## Martin Maechler <maechler@stat.math.ethz.ch>,
+## motivated by an application of nor1mix and copula
+## from Lei Liu <liulei@virginia.edu>.
+## They fixes the function getExpr in the old
+## version, which assumed that the parameters to
+## [rdpq]<distrib> were vectors.
+
+asCall <- function(fun, param)
+{
+    cc <-
+	if (length(param) == 0)
+	    quote(FUN(x))
+	else if(is.list(param)) {
+	    as.call(c(quote(FUN), c(quote(x), as.expression(param))))
+	} else { ## assume that [dpq]<distrib>(x, param) will work
+	    as.call(c(quote(FUN), c(quote(x), substitute(param))))
+	}
+    cc[[1]] <- as.name(fun)
+    cc
+}
+
+dMvdc <- function(x, mvdc, log=FALSE) {
+  dim <- dim(mvdc@copula)
+  densmarg <- if(log) 0 else 1
+  if (is.vector(x)) x <- matrix(x, nrow = 1)
+  u <- x
+  for (i in 1:dim) {
+    cdf.expr <- asCall(paste0("p", mvdc@margins[i]), mvdc@paramMargins[[i]])
+    pdf.expr <- asCall(paste0("d", mvdc@margins[i]), mvdc@paramMargins[[i]])
+    u[,i] <- eval(cdf.expr, list(x = x[,i]))
+    densmarg <-
+	if(log)
+	    ## FIXME: user should be able to give density which has a log argument
+	    densmarg + log(eval(pdf.expr, list(x = x[,i])))
+	else
+	    densmarg * eval(pdf.expr, list(x = x[,i]))
+  }
+  if(log)
+      dCopula(u, mvdc@copula, log=TRUE) + densmarg
+  else
+      dCopula(u, mvdc@copula) * densmarg
+}
+
+pMvdc <- function(x, mvdc) {
+  dim <- dim(mvdc@copula)
+  if (is.vector(x)) x <- matrix(x, nrow = 1)
+  u <- x
+  for (i in 1:dim) {
+    cdf.expr <- asCall(paste0("p", mvdc@margins[i]), mvdc@paramMargins[[i]])
+    u[,i] <- eval(cdf.expr, list(x = x[,i]))
+  }
+  pCopula(u, mvdc@copula)
+}
+
+rMvdc <- function(n, mvdc) {
+  dim <- dim(mvdc@copula)
+  u <- rCopula(n, mvdc@copula)
+  x <- u
+  for (i in 1:dim) {
+    qdf.expr <- asCall(paste0("q", mvdc@margins[i]), mvdc@paramMargins[[i]])
+    x[,i] <- eval(qdf.expr, list(x = u[,i]))
+  }
+  x
+}
+
+dmvdc <- function(mvdc, x, log=FALSE) { .Defunct("dMvdc"); dMvdc(x, mvdc, log) }
+pmvdc <- function(mvdc, x) { .Defunct("pMvdc"); pMvdc(x, mvdc) }
+rmvdc <- function(mvdc, n) { .Defunct("rMvdc"); rMvdc(n, mvdc) }
+
+print.mvdc <- function(x, digits = getOption("digits"), ...)
+{
+    cat("Multivariate Distribution Copula based (\"mvdc\")\n @ copula:\n")
+    print(x@copula, digits=digits, ...)
+    cat(" @ margins:\n")
+    print(x@margins, ...)
+    margid <- x@marginsIdentical
+    p <- dim(x)
+    cat("   with", p, if(margid) "identical" else "(not identical)",
+        " margins;")
+    if(margid) {
+        cat(" each with parameters\n")
+        print(x@paramMargins[[1]], ...)
+    } else {
+        cat(" with parameters (@ paramMargins) \n")
+        str(x@paramMargins, digits.d = digits)
+    }
+    invisible(x)
+}
+
+setMethod("show", signature("mvdc"), function(object) print.mvdc(object))
+```
+
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+plot(cars)
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+plot(cars)
+```
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.

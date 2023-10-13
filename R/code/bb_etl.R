@@ -12,7 +12,8 @@ ret <-
   select(date = datestamp, item, value) %>%
   pivot_wider(names_from = "item")
 
-data <- read_csv("./data/quantathon_hannah.csv")
+# data <- read_csv("./data/quantathon_hannah.csv")
+data <- read_csv("C:/Users/hannah.denobrega/OneDrive - Prescient/projects/quantithon/data/quantathon_hannah.csv")
 
 data_tr <-
   data %>%
@@ -31,3 +32,4 @@ data_tr <-
   ungroup() %>%
   pivot_wider() %>%
   write_rds("data.rds")
+
